@@ -540,13 +540,15 @@ function importText(text, deck) {
   if (rows.length && /^(word|palabra|wort|de|deutsch)$/i.test((rows[0][0] || '').trim())) rows.shift();
   const keys = new Set(DB.notes.map(noteKey)); let added = 0, dup = 0, skip = 0; const t0 = Date.now();
   rows.forEach(r => {
-    const w = parseWord(r[0] || ''), es = stripHtml(r[1]);
-    if (!w.de || !es) { skip++; return; }
+    // Columns: word, es, example, register, tags, [en], [deck path]
+    const w = parseWord(r[0] || ''), es = stripHtml(r[1]), en = stripHtml(r[5]);
+    if (!w.de || !(es || en)) { skip++; return; }
     const k = (w.article + '|' + w.de).toLowerCase();
     if (keys.has(k)) { dup++; return; }
     keys.add(k);
     const tags = stripHtml(r[4]).split(/[\s,;]+/).filter(Boolean);
-    addNote({ article: w.article, de: w.de, plural: w.plural, es, example: stripHtml(r[2]), register: normRegister(r[3]), tags }, deck, t0 + added);
+    const d = stripHtml(r[6]).trim() || deck;
+    addNote({ article: w.article, de: w.de, plural: w.plural, es, en, example: stripHtml(r[2]), register: normRegister(r[3]), tags }, d, t0 + added);
     added++;
   });
   save();
