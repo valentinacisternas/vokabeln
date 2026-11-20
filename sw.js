@@ -1,5 +1,5 @@
 // Offline cache for Vokabeln. Bump CACHE when any cached file changes.
-const CACHE = 'vokabeln-v1';
+const CACHE = 'vokabeln-v2';
 const ASSETS = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

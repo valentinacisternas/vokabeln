@@ -176,6 +176,8 @@
   .note { color:var(--muted); font-size:13px; margin:8px 4px; }
   .stat3 { display:grid; grid-template-columns:repeat(3,1fr); text-align:center; }
   .stat3 div { padding:14px 4px; } .stat3 b { display:block; font-size:24px; } .stat3 span { font-size:12px; color:var(--muted); }
+  .front.mean { flex-direction:column; align-items:center; gap:10px; font-size:28px; }
+  .ml { line-height:1.25; } .ml .lg { vertical-align:middle; margin-right:6px; }
   svg.chart text { fill:var(--muted); font-size:10px; }
 </style>
 </head>
@@ -240,12 +242,12 @@ const IMG = {}; // note id -> data URL (mirror of IndexedDB)
 
 function defaultDB() {
   return {
-    v: 2, notes: [], cards: [], decks: {}, log: [],
-    settings: { steps: '1m 10m', grad: 1, easy: 4, theme: 'system', voice: '', rate: 0.9, drillAffects: false },
+    v: 2, seedVersion: 0, bonus: null, notes: [], cards: [], decks: {}, log: [],
+    settings: { steps: '1m 10m', grad: 1, easy: 4, theme: 'system', voice: '', rate: 0.9, drillAffects: false, autoSpeak: true },
     days: [], saved: [], collapsed: [], seeded: false
   };
 }
-function defaultOpts() { return { newPerDay: 15, maxRev: 200, reverse: true }; }
+function defaultOpts() { return { newPerDay: 15, maxRev: 200, dir: 'm2d' }; }
 
 function load() {
   let raw = null;
@@ -319,7 +321,13 @@ function ensureDeck(name) {
   return p;
 }
 const allDecks = () => Object.keys(DB.decks).sort((a, b) => a.localeCompare(b, 'de'));
-const activeCards = () => DB.cards.filter(c => { const n = N(c.nid); return n && (c.ord === 0 || deckOpts(n.deck).reverse); });
+// Direction per deck: 'm2d' meaning -> German (card ord 1), 'd2m' German -> meaning (ord 0), 'both'.
+const dirOk = (ord, deck) => { const d = deckOpts(deck).dir; return d === 'both' || (d === 'd2m' && ord === 0) || (d === 'm2d' && ord === 1); };
+const activeCards = () => DB.cards.filter(c => { const n = N(c.nid); return n && dirOk(c.ord, n.deck); });
+const cardLabel = (c, n) => deckOpts(n.deck).dir === 'both' ? `Tarjeta ${c.ord + 1}/2` : 'Tarjeta 1/1';
+const bonusToday = d => (DB.bonus && DB.bonus.day === dayNum() && DB.bonus.d[d]) || 0;
+const newLimit = d => deckOpts(d).newPerDay + bonusToday(d);
+function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = rnd(0, i); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
 function newCard(nid, ord) {
   return { id: uid('k'), nid, ord, state: 'new', step: 0, ivl: 0, ease: 2.5, reps: 0, lapses: 0, due: 0, dueDay: 0, flag: 0, suspended: false, buryDay: -1, last: 0 };
@@ -372,7 +380,9 @@ function calc(c, q) {
     return r;
   }
   // review
-  const ivl = Math.max(1, c.ivl), ease = c.ease;
+  // reviewed early (study ahead): use the time that actually elapsed since the last review
+  let ivl = Math.max(1, c.ivl); const ease = c.ease, td = dayNum();
+  if (c.dueDay > td) ivl = Math.max(1, td - (c.dueDay - c.ivl));
   if (q === 1) { r.lapses = c.lapses + 1; r.ease = Math.max(1.3, ease - 0.20); r.state = 'relearn'; r.step = 0; r.ivl = 1; r.min = RELEARN[0]; }
   else if (q === 2) { r.ease = Math.max(1.3, ease - 0.15); r.ivl = Math.max(ivl + 1, Math.round(ivl * 1.2)); }
   else if (q === 3) { r.ivl = Math.max(ivl + 1, Math.round(ivl * ease)); }
@@ -424,7 +434,7 @@ function counts(root) {
   const tot = { n: 0, l: 0, r: 0, t: 0 };
   Object.keys(per).forEach(d => {
     const o = deckOpts(d), dn = done[d] || { n: 0, r: 0 }, p = per[d];
-    tot.n += Math.min(p.n, Math.max(0, o.newPerDay - dn.n));
+    tot.n += Math.min(p.n, Math.max(0, newLimit(d) - dn.n));
     tot.r += Math.min(p.r, Math.max(0, o.maxRev - dn.r));
     tot.l += p.l; tot.t += p.t;
   });
@@ -443,7 +453,7 @@ function pickNext(root, dirFilter) {
       if (c.due <= now) { if (!learn || c.due < learn.due) learn = c; }
       else if (c.due <= now + LEARN_AHEAD) { if (!ahead || c.due < ahead.due) ahead = c; }
     } else if (c.state === 'review') { if (c.dueDay <= today && d.r < o.maxRev) rev.push(c); }
-    else if (c.state === 'new') { if (d.n < o.newPerDay && (!nw || noteOrder(c) < noteOrder(nw))) nw = c; }
+    else if (c.state === 'new') { if (d.n < newLimit(n.deck) && (!nw || noteOrder(c) < noteOrder(nw))) nw = c; }
   });
   return learn || (rev.length ? rev[rnd(0, rev.length - 1)] : null) || nw || ahead;
 }
@@ -556,88 +566,320 @@ function download(name, text, type) {
 /* =====================================================================
    8. SEED DECK (C1 vocabulary)
    ===================================================================== */
-const SEED = [
-  // [article, word, plural, meaning, example, register]
-  ['die', 'Voraussetzung', 'Voraussetzungen', 'requisito, condición previa', 'Eine abgeschlossene Ausbildung ist die Voraussetzung für diese Stelle.', 'sachlich'],
-  ['der', 'Aufwand', '', 'esfuerzo, coste (de tiempo o dinero)', 'Der Aufwand für das Projekt war größer als geplant.', 'sachlich'],
-  ['die', 'Nachhaltigkeit', '', 'sostenibilidad', 'Nachhaltigkeit spielt in unserer Firma eine große Rolle.', 'sachlich'],
-  ['die', 'Herausforderung', 'Herausforderungen', 'desafío, reto', 'Der Umzug nach München war eine echte Herausforderung.', ''],
-  ['der', 'Zusammenhang', 'Zusammenhänge', 'relación, contexto', 'In diesem Zusammenhang möchte ich noch etwas ergänzen.', 'sachlich'],
-  ['die', 'Auswirkung', 'Auswirkungen', 'repercusión, efecto', 'Die Auswirkungen der Krise sind überall spürbar.', 'sachlich'],
-  ['der', 'Einfluss', 'Einflüsse', 'influencia', 'Sein Einfluss auf die Entscheidung war erheblich.', 'sachlich'],
-  ['die', 'Entscheidung', 'Entscheidungen', 'decisión', 'Die Entscheidung ist uns nicht leichtgefallen.', ''],
-  ['der', 'Anspruch', 'Ansprüche', 'derecho, pretensión', 'Jeder Mitarbeiter hat Anspruch auf dreißig Urlaubstage.', 'sachlich'],
-  ['die', 'Gelegenheit', 'Gelegenheiten', 'oportunidad, ocasión', 'Ich nutze die Gelegenheit, mich bei Ihnen zu bedanken.', 'gehoben'],
-  ['der', 'Gegensatz', 'Gegensätze', 'contraste, oposición', 'Im Gegensatz zu ihm ist sie sehr ordentlich.', 'sachlich'],
-  ['die', 'Verantwortung', '', 'responsabilidad', 'Er übernimmt die Verantwortung für das gesamte Team.', 'sachlich'],
-  ['das', 'Vorhaben', 'Vorhaben', 'proyecto, propósito', 'Das Vorhaben scheiterte an der Finanzierung.', 'sachlich'],
-  ['die', 'Absicht', 'Absichten', 'intención', 'Ich hatte nicht die Absicht, dich zu verletzen.', ''],
-  ['der', 'Mangel', 'Mängel', 'carencia, defecto', 'Es herrscht ein Mangel an qualifizierten Fachkräften.', 'sachlich'],
-  ['die', 'Fachkraft', 'Fachkräfte', 'profesional cualificado', 'Die Firma sucht dringend neue Fachkräfte.', 'sachlich'],
-  ['der', 'Wandel', '', 'cambio, transformación', 'Die Branche befindet sich im Wandel.', 'gehoben'],
-  ['die', 'Bedingung', 'Bedingungen', 'condición', 'Unter diesen Bedingungen kann ich nicht arbeiten.', 'sachlich'],
-  ['das', 'Verhältnis', 'Verhältnisse', 'relación, proporción', 'Das Verhältnis zu meinen Kollegen ist sehr gut.', ''],
-  ['der', 'Umgang', '', 'trato, manejo', 'Der Umgang mit Kunden erfordert Fingerspitzengefühl.', 'sachlich'],
-  ['das', 'Ergebnis', 'Ergebnisse', 'resultado', 'Das Ergebnis der Untersuchung überraschte alle.', ''],
-  ['die', 'Maßnahme', 'Maßnahmen', 'medida', 'Die Regierung hat neue Maßnahmen beschlossen.', 'sachlich'],
-  ['der', 'Beitrag', 'Beiträge', 'contribución, cuota, artículo', 'Jeder kann einen Beitrag zum Klimaschutz leisten.', ''],
-  ['die', 'Einschränkung', 'Einschränkungen', 'restricción, limitación', 'Trotz der Einschränkungen läuft der Betrieb weiter.', 'sachlich'],
-  ['das', 'Bewusstsein', '', 'conciencia', 'Das Bewusstsein für Umweltprobleme wächst.', 'sachlich'],
-  ['der', 'Eindruck', 'Eindrücke', 'impresión', 'Sie hat auf mich einen sehr professionellen Eindruck gemacht.', ''],
-  ['die', 'Erfahrung', 'Erfahrungen', 'experiencia', 'Ich habe gute Erfahrungen mit dieser Methode gemacht.', ''],
-  ['das', 'Anliegen', 'Anliegen', 'asunto, petición, preocupación', 'Was kann ich für Sie tun? – Ich habe ein Anliegen.', 'sachlich'],
-  ['der', 'Kompromiss', 'Kompromisse', 'compromiso, acuerdo', 'Wir haben uns auf einen Kompromiss geeinigt.', ''],
-  ['die', 'Ausnahme', 'Ausnahmen', 'excepción', 'Ausnahmen bestätigen die Regel.', ''],
-  ['das', 'Gespür', '', 'instinto, olfato, sensibilidad', 'Sie hat ein gutes Gespür für Sprache.', 'gehoben'],
-  ['der', 'Schwerpunkt', 'Schwerpunkte', 'enfoque principal, énfasis', 'Der Schwerpunkt des Kurses liegt auf der Grammatik.', 'sachlich'],
-  ['die', 'Zuständigkeit', 'Zuständigkeiten', 'competencia, responsabilidad', 'Diese Frage fällt nicht in meine Zuständigkeit.', 'sachlich'],
-  ['der', 'Umstand', 'Umstände', 'circunstancia', 'Unter diesen Umständen können wir nichts tun.', 'sachlich'],
-  ['das', 'Versäumnis', 'Versäumnisse', 'omisión, negligencia', 'Dieses Versäumnis hätte vermieden werden können.', 'gehoben'],
-  ['der', 'Hintergrund', 'Hintergründe', 'trasfondo, contexto, fondo', 'Die Hintergründe des Falls sind noch unklar.', 'sachlich'],
-  ['sich', 'auseinandersetzen mit', '', 'lidiar con, analizar a fondo', 'Ich muss mich intensiv mit dem Thema auseinandersetzen.', 'sachlich'],
-  ['', 'berücksichtigen', '', 'tener en cuenta', 'Bitte berücksichtigen Sie auch die Kosten.', 'sachlich'],
-  ['', 'bewältigen', '', 'superar, gestionar', 'Sie bewältigt den Alltag trotz allem erstaunlich gut.', 'sachlich'],
-  ['', 'voraussetzen', '', 'presuponer, requerir', 'Diese Stelle setzt gute Deutschkenntnisse voraus.', 'sachlich'],
-  ['', 'beeinträchtigen', '', 'perjudicar, afectar negativamente', 'Der Lärm beeinträchtigt meine Konzentration.', 'sachlich'],
-  ['', 'veranlassen', '', 'ordenar, disponer, provocar', 'Der Chef veranlasste eine sofortige Überprüfung.', 'gehoben'],
-  ['sich', 'bemühen um', '', 'esforzarse por, procurar', 'Er bemüht sich um eine Stelle in München.', 'sachlich'],
-  ['', 'beanstanden', '', 'reclamar, poner reparos a', 'Der Kunde beanstandete die Qualität der Lieferung.', 'sachlich'],
-  ['', 'verzichten auf', '', 'renunciar a', 'Wir müssen leider auf einen Urlaub verzichten.', 'sachlich'],
-  ['', 'hinterfragen', '', 'cuestionar', 'Man sollte solche Aussagen kritisch hinterfragen.', 'sachlich'],
-  ['sich', 'ereignen', '', 'ocurrir, suceder', 'Der Unfall ereignete sich gestern Abend.', 'gehoben'],
-  ['', 'anstreben', '', 'aspirar a, perseguir', 'Wir streben eine langfristige Zusammenarbeit an.', 'sachlich'],
-  ['', 'abwägen', '', 'sopesar, ponderar', 'Man muss Vor- und Nachteile sorgfältig abwägen.', 'sachlich'],
-  ['sich', 'einigen auf', '', 'ponerse de acuerdo en', 'Wir haben uns auf einen Termin geeinigt.', ''],
-  ['', 'vernachlässigen', '', 'descuidar', 'Er vernachlässigt seine Freunde wegen der Arbeit.', ''],
-  ['', 'nachvollziehbar', '', 'comprensible, lógico', 'Deine Entscheidung ist für mich gut nachvollziehbar.', 'sachlich'],
-  ['', 'gravierend', '', 'grave, serio', 'Das ist ein gravierender Fehler.', 'sachlich'],
-  ['', 'erheblich', '', 'considerable', 'Die Kosten sind erheblich gestiegen.', 'sachlich'],
-  ['', 'unerlässlich', '', 'imprescindible', 'Gute Planung ist unerlässlich.', 'gehoben'],
-  ['', 'schlüssig', '', 'coherente, concluyente', 'Seine Argumentation war nicht schlüssig.', 'sachlich'],
-  ['', 'hartnäckig', '', 'persistente, tenaz', 'Sie verfolgt ihr Ziel hartnäckig.', ''],
-  ['', 'beiläufig', '', 'de pasada, casual', 'Er erwähnte es nur beiläufig.', 'sachlich'],
-  ['', 'krass', '', 'brutal, fuerte, exagerado', 'Das ist ja echt krass!', 'ugs.'],
-  ['', 'infolgedessen', '', 'como consecuencia de ello', 'Es regnete stark, infolgedessen fiel das Fest aus.', 'sachlich'],
-  ['', 'demzufolge', '', 'según eso, por consiguiente', 'Demzufolge müssen wir den Plan ändern.', 'gehoben'],
-  ['', 'hingegen', '', 'en cambio', 'Ich trinke Kaffee, mein Bruder hingegen mag nur Tee.', 'sachlich'],
-  ['', 'zumal', '', 'sobre todo porque, tanto más cuanto que', 'Ich komme gern mit, zumal ich morgen frei habe.', ''],
-  ['', 'dennoch', '', 'sin embargo, a pesar de ello', 'Es war schwierig, dennoch haben wir es geschafft.', ''],
-  ['', 'ohnehin', '', 'de todos modos, ya de por sí', 'Ich fahre ohnehin in die Stadt, ich kann dich mitnehmen.', ''],
-  ['', 'allerdings', '', 'eso sí, no obstante', 'Das Essen war gut, allerdings etwas teuer.', ''],
-  ['', 'diesbezüglich', '', 'al respecto', 'Diesbezüglich liegen uns keine Informationen vor.', 'sachlich'],
-  ['', 'insofern', '', 'en este sentido, en tanto que', 'Insofern haben Sie recht.', 'sachlich'],
-  ['', 'überdies', '', 'además, por otra parte', 'Das Hotel ist teuer, überdies liegt es weit vom Zentrum.', 'gehoben'],
-  ['', 'nichtsdestoweniger', '', 'no obstante, sin embargo', 'Nichtsdestoweniger bleibt das Problem bestehen.', 'gehoben'],
-  ['', 'eh', '', 'de todos modos (coloquial)', 'Das mache ich eh nicht.', 'ugs.']
+const SEED_VERSION = 2;
+// Rows: [article, word, plural, meaning ES, meaning EN, example, register]
+const SEEDS = [
+  { deck: 'Alemán::C1', level: 'C1', rows: [
+    ['die', 'Voraussetzung', 'Voraussetzungen', 'requisito, condición previa', 'requirement, prerequisite', 'Eine abgeschlossene Ausbildung ist die Voraussetzung für diese Stelle.', 'sachlich'],
+    ['der', 'Aufwand', '', 'esfuerzo, coste (de tiempo o dinero)', 'effort, expense', 'Der Aufwand für das Projekt war größer als geplant.', 'sachlich'],
+    ['die', 'Nachhaltigkeit', '', 'sostenibilidad', 'sustainability', 'Nachhaltigkeit spielt in unserer Firma eine große Rolle.', 'sachlich'],
+    ['die', 'Herausforderung', 'Herausforderungen', 'desafío, reto', 'challenge', 'Der Umzug nach München war eine echte Herausforderung.', ''],
+    ['der', 'Zusammenhang', 'Zusammenhänge', 'relación, contexto', 'connection, context', 'In diesem Zusammenhang möchte ich noch etwas ergänzen.', 'sachlich'],
+    ['die', 'Auswirkung', 'Auswirkungen', 'repercusión, efecto', 'impact, effect', 'Die Auswirkungen der Krise sind überall spürbar.', 'sachlich'],
+    ['der', 'Einfluss', 'Einflüsse', 'influencia', 'influence', 'Sein Einfluss auf die Entscheidung war erheblich.', 'sachlich'],
+    ['die', 'Entscheidung', 'Entscheidungen', 'decisión', 'decision', 'Die Entscheidung ist uns nicht leichtgefallen.', ''],
+    ['der', 'Anspruch', 'Ansprüche', 'derecho, pretensión', 'entitlement, claim', 'Jeder Mitarbeiter hat Anspruch auf dreißig Urlaubstage.', 'sachlich'],
+    ['die', 'Gelegenheit', 'Gelegenheiten', 'oportunidad, ocasión', 'opportunity, occasion', 'Ich nutze die Gelegenheit, mich bei Ihnen zu bedanken.', 'gehoben'],
+    ['der', 'Gegensatz', 'Gegensätze', 'contraste, oposición', 'contrast, opposite', 'Im Gegensatz zu ihm ist sie sehr ordentlich.', 'sachlich'],
+    ['die', 'Verantwortung', '', 'responsabilidad', 'responsibility', 'Er übernimmt die Verantwortung für das gesamte Team.', 'sachlich'],
+    ['das', 'Vorhaben', 'Vorhaben', 'proyecto, propósito', 'project, plan, undertaking', 'Das Vorhaben scheiterte an der Finanzierung.', 'sachlich'],
+    ['die', 'Absicht', 'Absichten', 'intención', 'intention', 'Ich hatte nicht die Absicht, dich zu verletzen.', ''],
+    ['der', 'Mangel', 'Mängel', 'carencia, defecto', 'shortage, defect', 'Es herrscht ein Mangel an qualifizierten Fachkräften.', 'sachlich'],
+    ['die', 'Fachkraft', 'Fachkräfte', 'profesional cualificado', 'skilled worker', 'Die Firma sucht dringend neue Fachkräfte.', 'sachlich'],
+    ['der', 'Wandel', '', 'cambio, transformación', 'change, transformation', 'Die Branche befindet sich im Wandel.', 'gehoben'],
+    ['die', 'Bedingung', 'Bedingungen', 'condición', 'condition', 'Unter diesen Bedingungen kann ich nicht arbeiten.', 'sachlich'],
+    ['das', 'Verhältnis', 'Verhältnisse', 'relación, proporción', 'relationship, ratio', 'Das Verhältnis zu meinen Kollegen ist sehr gut.', ''],
+    ['der', 'Umgang', '', 'trato, manejo', 'dealings, way of handling', 'Der Umgang mit Kunden erfordert Fingerspitzengefühl.', 'sachlich'],
+    ['das', 'Ergebnis', 'Ergebnisse', 'resultado', 'result', 'Das Ergebnis der Untersuchung überraschte alle.', ''],
+    ['die', 'Maßnahme', 'Maßnahmen', 'medida', 'measure', 'Die Regierung hat neue Maßnahmen beschlossen.', 'sachlich'],
+    ['der', 'Beitrag', 'Beiträge', 'contribución, cuota, artículo', 'contribution, fee', 'Jeder kann einen Beitrag zum Klimaschutz leisten.', ''],
+    ['die', 'Einschränkung', 'Einschränkungen', 'restricción, limitación', 'restriction', 'Trotz der Einschränkungen läuft der Betrieb weiter.', 'sachlich'],
+    ['das', 'Bewusstsein', '', 'conciencia', 'awareness, consciousness', 'Das Bewusstsein für Umweltprobleme wächst.', 'sachlich'],
+    ['der', 'Eindruck', 'Eindrücke', 'impresión', 'impression', 'Sie hat auf mich einen sehr professionellen Eindruck gemacht.', ''],
+    ['die', 'Erfahrung', 'Erfahrungen', 'experiencia', 'experience', 'Ich habe gute Erfahrungen mit dieser Methode gemacht.', ''],
+    ['das', 'Anliegen', 'Anliegen', 'asunto, petición, preocupación', 'concern, request', 'Was kann ich für Sie tun? – Ich habe ein Anliegen.', 'sachlich'],
+    ['der', 'Kompromiss', 'Kompromisse', 'compromiso, acuerdo', 'compromise', 'Wir haben uns auf einen Kompromiss geeinigt.', ''],
+    ['die', 'Ausnahme', 'Ausnahmen', 'excepción', 'exception', 'Ausnahmen bestätigen die Regel.', ''],
+    ['das', 'Gespür', '', 'instinto, olfato, sensibilidad', 'flair, sense', 'Sie hat ein gutes Gespür für Sprache.', 'gehoben'],
+    ['der', 'Schwerpunkt', 'Schwerpunkte', 'enfoque principal, énfasis', 'focus, main emphasis', 'Der Schwerpunkt des Kurses liegt auf der Grammatik.', 'sachlich'],
+    ['die', 'Zuständigkeit', 'Zuständigkeiten', 'competencia, responsabilidad', 'responsibility, jurisdiction', 'Diese Frage fällt nicht in meine Zuständigkeit.', 'sachlich'],
+    ['der', 'Umstand', 'Umstände', 'circunstancia', 'circumstance', 'Unter diesen Umständen können wir nichts tun.', 'sachlich'],
+    ['das', 'Versäumnis', 'Versäumnisse', 'omisión, negligencia', 'omission, failure', 'Dieses Versäumnis hätte vermieden werden können.', 'gehoben'],
+    ['der', 'Hintergrund', 'Hintergründe', 'trasfondo, contexto, fondo', 'background', 'Die Hintergründe des Falls sind noch unklar.', 'sachlich'],
+    ['', 'sich auseinandersetzen mit', '', 'lidiar con, analizar a fondo', 'to engage with, to deal with', 'Ich muss mich intensiv mit dem Thema auseinandersetzen.', 'sachlich'],
+    ['', 'berücksichtigen', '', 'tener en cuenta', 'to take into account', 'Bitte berücksichtigen Sie auch die Kosten.', 'sachlich'],
+    ['', 'bewältigen', '', 'superar, gestionar', 'to cope with, to manage', 'Sie bewältigt den Alltag trotz allem erstaunlich gut.', 'sachlich'],
+    ['', 'voraussetzen', '', 'presuponer, requerir', 'to presuppose, to require', 'Diese Stelle setzt gute Deutschkenntnisse voraus.', 'sachlich'],
+    ['', 'beeinträchtigen', '', 'perjudicar, afectar negativamente', 'to impair, to affect negatively', 'Der Lärm beeinträchtigt meine Konzentration.', 'sachlich'],
+    ['', 'veranlassen', '', 'ordenar, disponer, provocar', 'to arrange, to cause', 'Der Chef veranlasste eine sofortige Überprüfung.', 'gehoben'],
+    ['', 'sich bemühen um', '', 'esforzarse por, procurar', 'to make an effort to get', 'Er bemüht sich um eine Stelle in München.', 'sachlich'],
+    ['', 'beanstanden', '', 'reclamar, poner reparos a', 'to complain about, to object to', 'Der Kunde beanstandete die Qualität der Lieferung.', 'sachlich'],
+    ['', 'verzichten auf', '', 'renunciar a', 'to do without, to give up', 'Wir müssen leider auf einen Urlaub verzichten.', 'sachlich'],
+    ['', 'hinterfragen', '', 'cuestionar', 'to question, to challenge', 'Man sollte solche Aussagen kritisch hinterfragen.', 'sachlich'],
+    ['', 'sich ereignen', '', 'ocurrir, suceder', 'to occur, to happen', 'Der Unfall ereignete sich gestern Abend.', 'gehoben'],
+    ['', 'anstreben', '', 'aspirar a, perseguir', 'to aim for, to strive for', 'Wir streben eine langfristige Zusammenarbeit an.', 'sachlich'],
+    ['', 'abwägen', '', 'sopesar, ponderar', 'to weigh up', 'Man muss Vor- und Nachteile sorgfältig abwägen.', 'sachlich'],
+    ['', 'sich einigen auf', '', 'ponerse de acuerdo en', 'to agree on', 'Wir haben uns auf einen Termin geeinigt.', ''],
+    ['', 'vernachlässigen', '', 'descuidar', 'to neglect', 'Er vernachlässigt seine Freunde wegen der Arbeit.', ''],
+    ['', 'nachvollziehbar', '', 'comprensible, lógico', 'understandable, comprehensible', 'Deine Entscheidung ist für mich gut nachvollziehbar.', 'sachlich'],
+    ['', 'gravierend', '', 'grave, serio', 'serious, grave', 'Das ist ein gravierender Fehler.', 'sachlich'],
+    ['', 'erheblich', '', 'considerable', 'considerable, significant', 'Die Kosten sind erheblich gestiegen.', 'sachlich'],
+    ['', 'unerlässlich', '', 'imprescindible', 'essential, indispensable', 'Gute Planung ist unerlässlich.', 'gehoben'],
+    ['', 'schlüssig', '', 'coherente, concluyente', 'coherent, conclusive', 'Seine Argumentation war nicht schlüssig.', 'sachlich'],
+    ['', 'hartnäckig', '', 'persistente, tenaz', 'persistent, stubborn', 'Sie verfolgt ihr Ziel hartnäckig.', ''],
+    ['', 'beiläufig', '', 'de pasada, casual', 'casual, in passing', 'Er erwähnte es nur beiläufig.', 'sachlich'],
+    ['', 'krass', '', 'brutal, fuerte, exagerado', 'extreme, wow (slang)', 'Das ist ja echt krass!', 'ugs.'],
+    ['', 'infolgedessen', '', 'como consecuencia de ello', 'as a result', 'Es regnete stark, infolgedessen fiel das Fest aus.', 'sachlich'],
+    ['', 'demzufolge', '', 'según eso, por consiguiente', 'accordingly, consequently', 'Demzufolge müssen wir den Plan ändern.', 'gehoben'],
+    ['', 'hingegen', '', 'en cambio', 'whereas, on the other hand', 'Ich trinke Kaffee, mein Bruder hingegen mag nur Tee.', 'sachlich'],
+    ['', 'zumal', '', 'sobre todo porque, tanto más cuanto que', 'especially since', 'Ich komme gern mit, zumal ich morgen frei habe.', ''],
+    ['', 'dennoch', '', 'sin embargo, a pesar de ello', 'nevertheless', 'Es war schwierig, dennoch haben wir es geschafft.', ''],
+    ['', 'ohnehin', '', 'de todos modos, ya de por sí', 'anyway, in any case', 'Ich fahre ohnehin in die Stadt, ich kann dich mitnehmen.', ''],
+    ['', 'allerdings', '', 'eso sí, no obstante', 'however, though', 'Das Essen war gut, allerdings etwas teuer.', ''],
+    ['', 'diesbezüglich', '', 'al respecto', 'in this regard', 'Diesbezüglich liegen uns keine Informationen vor.', 'sachlich'],
+    ['', 'insofern', '', 'en este sentido, en tanto que', 'in this respect, to that extent', 'Insofern haben Sie recht.', 'sachlich'],
+    ['', 'überdies', '', 'además, por otra parte', 'moreover', 'Das Hotel ist teuer, überdies liegt es weit vom Zentrum.', 'gehoben'],
+    ['', 'nichtsdestoweniger', '', 'no obstante, sin embargo', 'nonetheless', 'Nichtsdestoweniger bleibt das Problem bestehen.', 'gehoben'],
+    ['', 'eh', '', 'de todos modos (coloquial)', 'anyway (colloquial)', 'Das mache ich eh nicht.', 'ugs.']
+  ] },
+  { deck: 'Alemán::B1', level: 'B1', rows: [
+    ['der', 'Termin', 'Termine', 'cita, fecha fija', 'appointment, date', 'Ich habe morgen einen Termin beim Arzt.', ''],
+    ['die', 'Möglichkeit', 'Möglichkeiten', 'posibilidad', 'possibility', 'Es gibt mehrere Möglichkeiten, das Problem zu lösen.', ''],
+    ['der', 'Vorschlag', 'Vorschläge', 'propuesta, sugerencia', 'suggestion, proposal', 'Hast du einen Vorschlag für das Wochenende?', ''],
+    ['die', 'Meinung', 'Meinungen', 'opinión', 'opinion', 'Meiner Meinung nach ist das eine gute Idee.', ''],
+    ['der', 'Unterschied', 'Unterschiede', 'diferencia', 'difference', 'Was ist der Unterschied zwischen diesen beiden Wörtern?', ''],
+    ['die', 'Bewerbung', 'Bewerbungen', 'solicitud de empleo, candidatura', 'job application', 'Ich schicke heute meine Bewerbung ab.', ''],
+    ['der', 'Lebenslauf', 'Lebensläufe', 'currículum vitae', 'CV, résumé', 'Bitte schicken Sie uns Ihren Lebenslauf.', ''],
+    ['das', 'Vorstellungsgespräch', 'Vorstellungsgespräche', 'entrevista de trabajo', 'job interview', 'Morgen habe ich ein Vorstellungsgespräch.', ''],
+    ['die', 'Stelle', 'Stellen', 'puesto de trabajo', 'job, position', 'Sie hat eine neue Stelle in München gefunden.', ''],
+    ['der', 'Arbeitgeber', 'Arbeitgeber', 'empleador', 'employer', 'Mein Arbeitgeber bezahlt die Fortbildung.', ''],
+    ['der', 'Kollege', 'Kollegen', 'colega (compañero de trabajo)', 'colleague', 'Mein Kollege hilft mir bei dem Projekt.', ''],
+    ['die', 'Besprechung', 'Besprechungen', 'reunión', 'meeting', 'Die Besprechung beginnt um zehn Uhr.', ''],
+    ['die', 'Wohnung', 'Wohnungen', 'vivienda, piso', 'apartment, flat', 'Wir suchen eine größere Wohnung.', ''],
+    ['die', 'Miete', 'Mieten', 'alquiler', 'rent', 'Die Miete ist jeden Monat am Ersten fällig.', ''],
+    ['der', 'Vermieter', 'Vermieter', 'arrendador, casero', 'landlord', 'Der Vermieter repariert die Heizung.', ''],
+    ['die', 'Verspätung', 'Verspätungen', 'retraso', 'delay', 'Der Zug hat zehn Minuten Verspätung.', ''],
+    ['der', 'Bahnhof', 'Bahnhöfe', 'estación de tren', 'train station', 'Wir treffen uns am Bahnhof.', ''],
+    ['die', 'Fahrkarte', 'Fahrkarten', 'billete', 'ticket', 'Wo kann ich eine Fahrkarte kaufen?', ''],
+    ['der', 'Flughafen', 'Flughäfen', 'aeropuerto', 'airport', 'Der Flughafen liegt außerhalb der Stadt.', ''],
+    ['die', 'Reise', 'Reisen', 'viaje', 'trip, journey', 'Die Reise nach Spanien war wunderbar.', ''],
+    ['der', 'Urlaub', 'Urlaube', 'vacaciones', 'holiday, leave', 'Ich habe nächste Woche Urlaub.', ''],
+    ['die', 'Gesundheit', '', 'salud', 'health', 'Gesundheit ist wichtiger als Geld.', ''],
+    ['die', 'Krankheit', 'Krankheiten', 'enfermedad', 'illness', 'Wegen einer Krankheit konnte er nicht kommen.', ''],
+    ['der', 'Schmerz', 'Schmerzen', 'dolor', 'pain', 'Ich habe starke Schmerzen im Rücken.', ''],
+    ['das', 'Rezept', 'Rezepte', 'receta (médica o de cocina)', 'prescription, recipe', 'Der Arzt hat mir ein Rezept gegeben.', ''],
+    ['die', 'Apotheke', 'Apotheken', 'farmacia', 'pharmacy', 'Die Apotheke hat bis 20 Uhr geöffnet.', ''],
+    ['die', 'Versicherung', 'Versicherungen', 'seguro', 'insurance', 'Die Versicherung zahlt den Schaden.', ''],
+    ['die', 'Rechnung', 'Rechnungen', 'factura, cuenta', 'bill, invoice', 'Könnten wir bitte die Rechnung haben?', ''],
+    ['das', 'Angebot', 'Angebote', 'oferta', 'offer', 'Das Angebot gilt nur noch bis Freitag.', ''],
+    ['die', 'Kenntnis', 'Kenntnisse', 'conocimiento', 'knowledge, skill', 'Für diese Stelle brauchst du gute Kenntnisse in Englisch.', ''],
+    ['die', 'Ausbildung', 'Ausbildungen', 'formación profesional', 'vocational training', 'Sie macht eine Ausbildung zur Krankenschwester.', ''],
+    ['der', 'Abschluss', 'Abschlüsse', 'título, finalización', 'degree, completion', 'Er hat einen Abschluss in Informatik.', ''],
+    ['die', 'Prüfung', 'Prüfungen', 'examen', 'exam', 'Ich bin sehr nervös vor der Prüfung.', ''],
+    ['der', 'Unterricht', '', 'clase, enseñanza', 'lessons, teaching', 'Der Unterricht beginnt um acht Uhr.', ''],
+    ['die', 'Gesellschaft', 'Gesellschaften', 'sociedad', 'society', 'Die Gesellschaft verändert sich schnell.', ''],
+    ['die', 'Umwelt', '', 'medio ambiente', 'environment', 'Wir müssen die Umwelt besser schützen.', ''],
+    ['die', 'Zukunft', '', 'futuro', 'future', 'Was möchtest du in Zukunft machen?', ''],
+    ['der', 'Vorteil', 'Vorteile', 'ventaja', 'advantage', 'Ein Vorteil dieser Wohnung ist die Lage.', ''],
+    ['der', 'Nachteil', 'Nachteile', 'desventaja', 'disadvantage', 'Der Nachteil ist der hohe Preis.', ''],
+    ['die', 'Veranstaltung', 'Veranstaltungen', 'evento', 'event', 'Die Veranstaltung findet im Stadtpark statt.', ''],
+    ['der', 'Ausflug', 'Ausflüge', 'excursión', 'outing, day trip', 'Am Sonntag machen wir einen Ausflug an den See.', ''],
+    ['die', 'Einladung', 'Einladungen', 'invitación', 'invitation', 'Danke für die Einladung zur Party!', ''],
+    ['das', 'Ziel', 'Ziele', 'objetivo, destino', 'goal, destination', 'Mein Ziel ist es, fließend Deutsch zu sprechen.', ''],
+    ['der', 'Wunsch', 'Wünsche', 'deseo', 'wish', 'Hast du einen besonderen Wunsch?', ''],
+    ['die', 'Sorge', 'Sorgen', 'preocupación', 'worry, concern', 'Mach dir keine Sorgen, es wird alles gut.', ''],
+    ['das', 'Gefühl', 'Gefühle', 'sentimiento, sensación', 'feeling', 'Ich habe das Gefühl, dass etwas nicht stimmt.', ''],
+    ['der', 'Verkehr', '', 'tráfico', 'traffic', 'Heute Morgen war viel Verkehr.', ''],
+    ['die', 'Nachbarschaft', '', 'vecindario, vecinos', 'neighbourhood', 'In unserer Nachbarschaft wohnen viele Familien.', ''],
+    ['', 'sich entscheiden für', '', 'decidirse por', 'to decide on', 'Ich habe mich für das blaue Auto entschieden.', ''],
+    ['', 'sich erinnern an', '', 'acordarse de', 'to remember', 'Erinnerst du dich an unseren ersten Urlaub?', ''],
+    ['', 'sich freuen auf', '', 'alegrarse de (algo futuro)', 'to look forward to', 'Ich freue mich auf das Wochenende.', ''],
+    ['', 'sich ärgern über', '', 'enfadarse por', 'to be annoyed about', 'Er ärgert sich über den Lärm.', ''],
+    ['', 'sich interessieren für', '', 'interesarse por', 'to be interested in', 'Sie interessiert sich für Geschichte.', ''],
+    ['', 'sich vorbereiten auf', '', 'prepararse para', 'to prepare for', 'Wir bereiten uns auf die Prüfung vor.', ''],
+    ['', 'sich beschweren über', '', 'quejarse de', 'to complain about', 'Die Gäste beschweren sich über das Essen.', ''],
+    ['', 'sich kümmern um', '', 'ocuparse de', 'to take care of', 'Wer kümmert sich um die Kinder?', ''],
+    ['', 'sich verabreden mit', '', 'quedar con', 'to arrange to meet', 'Ich habe mich mit Anna zum Kaffee verabredet.', ''],
+    ['', 'sich bewerben um', '', 'solicitar (un puesto)', 'to apply for', 'Er bewirbt sich um eine Stelle als Ingenieur.', ''],
+    ['', 'sich unterhalten über', '', 'conversar sobre', 'to chat about', 'Wir haben uns lange über Politik unterhalten.', ''],
+    ['', 'sich verspäten', '', 'llegar tarde', 'to be late', 'Entschuldigung, ich habe mich leider verspätet.', ''],
+    ['', 'sich beeilen', '', 'darse prisa', 'to hurry', 'Beeil dich, sonst verpassen wir den Zug!', ''],
+    ['', 'sich entschuldigen für', '', 'disculparse por', 'to apologise for', 'Ich möchte mich für die Verspätung entschuldigen.', ''],
+    ['', 'sich gewöhnen an', '', 'acostumbrarse a', 'to get used to', 'Ich gewöhne mich langsam an das Wetter.', ''],
+    ['', 'sich anmelden', '', 'inscribirse, registrarse', 'to register, to sign up', 'Ich möchte mich für den Kurs anmelden.', ''],
+    ['', 'teilnehmen an', '', 'participar en', 'to take part in', 'Sie nimmt an einem Deutschkurs teil.', ''],
+    ['', 'abholen', '', 'recoger', 'to pick up', 'Kannst du mich vom Bahnhof abholen?', ''],
+    ['', 'ausfüllen', '', 'rellenar', 'to fill in', 'Bitte füllen Sie das Formular aus.', ''],
+    ['', 'umsteigen', '', 'hacer transbordo', 'to change (trains)', 'In Frankfurt müssen wir umsteigen.', ''],
+    ['', 'vorschlagen', '', 'proponer', 'to suggest', 'Ich schlage vor, dass wir früher anfangen.', ''],
+    ['', 'verschieben', '', 'aplazar', 'to postpone', 'Wir müssen den Termin leider verschieben.', ''],
+    ['', 'absagen', '', 'cancelar, excusarse', 'to cancel', 'Er hat die Einladung kurzfristig abgesagt.', ''],
+    ['', 'erledigen', '', 'resolver, hacer (una tarea)', 'to take care of, to get done', 'Ich muss noch ein paar Dinge erledigen.', ''],
+    ['', 'behaupten', '', 'afirmar, sostener', 'to claim', 'Er behauptet, nichts davon gewusst zu haben.', ''],
+    ['', 'vergleichen', '', 'comparar', 'to compare', 'Man sollte die Preise vergleichen.', ''],
+    ['', 'empfehlen', '', 'recomendar', 'to recommend', 'Können Sie mir ein gutes Restaurant empfehlen?', ''],
+    ['', 'ausgeben', '', 'gastar (dinero)', 'to spend (money)', 'Er gibt viel Geld für Kleidung aus.', ''],
+    ['', 'sparen', '', 'ahorrar', 'to save', 'Wir sparen für ein eigenes Haus.', ''],
+    ['', 'mieten', '', 'alquilar (tomar en alquiler)', 'to rent', 'Wir haben ein Auto für eine Woche gemietet.', ''],
+    ['', 'kündigen', '', 'rescindir, dar de baja', 'to terminate, to give notice', 'Ich habe meinen Vertrag gekündigt.', ''],
+    ['', 'erreichen', '', 'alcanzar, lograr, contactar', 'to reach, to achieve', 'Ich habe ihn telefonisch nicht erreicht.', ''],
+    ['', 'benutzen', '', 'usar, utilizar', 'to use', 'Darf ich dein Handy benutzen?', ''],
+    ['', 'reservieren', '', 'reservar', 'to reserve', 'Ich möchte einen Tisch für vier Personen reservieren.', ''],
+    ['', 'bestellen', '', 'pedir, encargar', 'to order', 'Wir bestellen eine Pizza.', ''],
+    ['', 'wichtig', '', 'importante', 'important', 'Es ist wichtig, rechtzeitig zu kommen.', ''],
+    ['', 'notwendig', '', 'necesario', 'necessary', 'Eine Anmeldung ist nicht notwendig.', ''],
+    ['', 'schwierig', '', 'difícil', 'difficult', 'Die Prüfung war ziemlich schwierig.', ''],
+    ['', 'anstrengend', '', 'agotador', 'tiring, exhausting', 'Die Arbeit ist heute sehr anstrengend.', ''],
+    ['', 'freundlich', '', 'amable', 'friendly, kind', 'Die Verkäuferin war sehr freundlich.', ''],
+    ['', 'pünktlich', '', 'puntual', 'punctual, on time', 'Bitte seid pünktlich um neun Uhr da.', ''],
+    ['', 'ehrlich', '', 'honesto, sincero', 'honest', 'Sei bitte ehrlich zu mir.', ''],
+    ['', 'sparsam', '', 'ahorrador, económico', 'thrifty, economical', 'Das Auto ist sehr sparsam im Verbrauch.', ''],
+    ['', 'gemütlich', '', 'acogedor, agradable', 'cosy, comfortable', 'Das Café ist klein, aber gemütlich.', ''],
+    ['', 'günstig', '', 'barato, favorable', 'cheap, favourable', 'Das Hotel war günstig und sauber.', ''],
+    ['', 'bequem', '', 'cómodo', 'comfortable', 'Dieser Sessel ist wirklich bequem.', ''],
+    ['', 'ziemlich', '', 'bastante', 'quite, fairly', 'Es ist heute ziemlich kalt.', ''],
+    ['', 'ungefähr', '', 'aproximadamente', 'approximately', 'Die Fahrt dauert ungefähr zwei Stunden.', ''],
+    ['', 'obwohl', '', 'aunque', 'although', 'Er geht zur Arbeit, obwohl er krank ist.', ''],
+    ['', 'weil', '', 'porque', 'because', 'Ich bleibe zu Hause, weil ich müde bin.', ''],
+    ['', 'damit', '', 'para que', 'so that', 'Ich erkläre es noch einmal, damit alle es verstehen.', ''],
+    ['', 'deshalb', '', 'por eso', 'therefore, that is why', 'Es regnet, deshalb bleiben wir drinnen.', ''],
+    ['', 'trotzdem', '', 'a pesar de eso', 'nevertheless, all the same', 'Es war teuer, aber wir haben es trotzdem gekauft.', ''],
+    ['', 'außerdem', '', 'además', 'besides, in addition', 'Die Wohnung ist günstig, außerdem liegt sie zentral.', ''],
+    ['', 'sobald', '', 'en cuanto, tan pronto como', 'as soon as', 'Ruf mich an, sobald du angekommen bist.', ''],
+    ['', 'während', '', 'mientras (que)', 'while, during', 'Während ich koche, siehst du fern.', ''],
+    ['', 'falls', '', 'en caso de que, si', 'in case, if', 'Falls du Zeit hast, komm doch vorbei.', ''],
+    ['', 'entweder … oder', '', 'o … o', 'either … or', 'Wir fahren entweder mit dem Zug oder mit dem Bus.', ''],
+    ['', 'sowohl … als auch', '', 'tanto … como', 'both … and', 'Sie spricht sowohl Deutsch als auch Spanisch.', ''],
+    ['', 'bevor', '', 'antes de que', 'before', 'Bevor du gehst, mach bitte das Licht aus.', ''],
+    ['', 'nachdem', '', 'después de que', 'after', 'Nachdem wir gegessen hatten, gingen wir spazieren.', '']
+  ] },
+  { deck: 'Alemán::B2', level: 'B2', rows: [
+    ['die', 'Entwicklung', 'Entwicklungen', 'desarrollo, evolución', 'development', 'Die Entwicklung der Stadt verlief sehr schnell.', 'sachlich'],
+    ['die', 'Forschung', '', 'investigación (científica)', 'research', 'Die Forschung braucht mehr finanzielle Mittel.', 'sachlich'],
+    ['die', 'Wirtschaft', '', 'economía', 'economy', 'Die Wirtschaft wächst langsamer als erwartet.', 'sachlich'],
+    ['der', 'Arbeitsmarkt', 'Arbeitsmärkte', 'mercado laboral', 'labour market', 'Der Arbeitsmarkt hat sich zuletzt erholt.', 'sachlich'],
+    ['die', 'Arbeitslosigkeit', '', 'desempleo', 'unemployment', 'Die Arbeitslosigkeit ist im letzten Jahr gesunken.', 'sachlich'],
+    ['das', 'Einkommen', 'Einkommen', 'ingresos', 'income', 'Das durchschnittliche Einkommen ist gestiegen.', 'sachlich'],
+    ['die', 'Steuer', 'Steuern', 'impuesto', 'tax', 'Die Steuern werden zum Jahresende erhöht.', ''],
+    ['der', 'Antrag', 'Anträge', 'solicitud', 'application, request', 'Sie hat einen Antrag auf Wohngeld gestellt.', 'sachlich'],
+    ['die', 'Behörde', 'Behörden', 'autoridad, oficina pública', 'authority, public office', 'Die Behörde bearbeitet den Antrag innerhalb von vier Wochen.', 'sachlich'],
+    ['der', 'Vertrag', 'Verträge', 'contrato', 'contract', 'Bitte lesen Sie den Vertrag sorgfältig durch.', 'sachlich'],
+    ['die', 'Kündigung', 'Kündigungen', 'despido, rescisión', 'termination, notice', 'Die Kündigung muss schriftlich erfolgen.', 'sachlich'],
+    ['der', 'Betrieb', 'Betriebe', 'empresa, planta', 'company, business', 'Der Betrieb beschäftigt rund zweihundert Mitarbeiter.', 'sachlich'],
+    ['die', 'Verhandlung', 'Verhandlungen', 'negociación', 'negotiation', 'Die Verhandlungen dauerten drei Tage.', 'sachlich'],
+    ['die', 'Vereinbarung', 'Vereinbarungen', 'acuerdo', 'agreement, arrangement', 'Wir haben eine Vereinbarung getroffen.', 'sachlich'],
+    ['die', 'Untersuchung', 'Untersuchungen', 'examen, estudio', 'examination, investigation', 'Die Untersuchung ergab keinen Befund.', 'sachlich'],
+    ['die', 'Behandlung', 'Behandlungen', 'tratamiento', 'treatment', 'Die Behandlung dauert mehrere Wochen.', 'sachlich'],
+    ['die', 'Verletzung', 'Verletzungen', 'lesión, herida', 'injury', 'Er erlitt bei dem Sturz eine schwere Verletzung.', ''],
+    ['die', 'Ernährung', '', 'alimentación', 'nutrition, diet', 'Eine gesunde Ernährung ist wichtig.', ''],
+    ['die', 'Veränderung', 'Veränderungen', 'cambio', 'change', 'Die Veränderungen im Team waren notwendig.', ''],
+    ['der', 'Fortschritt', 'Fortschritte', 'progreso', 'progress', 'Du hast in den letzten Monaten große Fortschritte gemacht.', ''],
+    ['die', 'Verbindung', 'Verbindungen', 'conexión, comunicación', 'connection', 'Die Verbindung nach Hamburg ist sehr gut.', ''],
+    ['die', 'Gewohnheit', 'Gewohnheiten', 'hábito, costumbre', 'habit', 'Frühes Aufstehen ist für mich zur Gewohnheit geworden.', ''],
+    ['die', 'Vorstellung', 'Vorstellungen', 'idea, imaginación', 'idea, notion', 'Ich habe keine Vorstellung davon, wie teuer das ist.', ''],
+    ['die', 'Tatsache', 'Tatsachen', 'hecho', 'fact', 'Das ist eine Tatsache, die man nicht ignorieren kann.', ''],
+    ['die', 'Behauptung', 'Behauptungen', 'afirmación', 'claim, assertion', 'Seine Behauptung konnte nicht bewiesen werden.', 'sachlich'],
+    ['der', 'Vergleich', 'Vergleiche', 'comparación', 'comparison', 'Im Vergleich zum Vorjahr ist der Umsatz gestiegen.', 'sachlich'],
+    ['die', 'Ursache', 'Ursachen', 'causa', 'cause', 'Die Ursache des Problems ist noch unbekannt.', 'sachlich'],
+    ['die', 'Folge', 'Folgen', 'consecuencia', 'consequence', 'Das könnte schlimme Folgen haben.', ''],
+    ['die', 'Lösung', 'Lösungen', 'solución', 'solution', 'Wir suchen nach einer schnellen Lösung.', ''],
+    ['der', 'Zweck', 'Zwecke', 'finalidad, propósito', 'purpose', 'Zu welchem Zweck brauchen Sie die Daten?', 'sachlich'],
+    ['die', 'Mehrheit', 'Mehrheiten', 'mayoría', 'majority', 'Die Mehrheit stimmte für den Vorschlag.', 'sachlich'],
+    ['die', 'Minderheit', 'Minderheiten', 'minoría', 'minority', 'Nur eine Minderheit war dagegen.', 'sachlich'],
+    ['der', 'Anteil', 'Anteile', 'parte, porcentaje', 'share, proportion', 'Der Anteil der Frauen im Team beträgt vierzig Prozent.', 'sachlich'],
+    ['die', 'Anforderung', 'Anforderungen', 'exigencia, requisito', 'requirement, demand', 'Die Anforderungen an die Bewerber sind hoch.', 'sachlich'],
+    ['die', 'Leistung', 'Leistungen', 'rendimiento, prestación', 'performance, service', 'Seine Leistungen in der Schule haben sich verbessert.', ''],
+    ['der', 'Verbraucher', 'Verbraucher', 'consumidor', 'consumer', 'Verbraucher sollten Preise genau vergleichen.', 'sachlich'],
+    ['die', 'Gebühr', 'Gebühren', 'tasa, cuota', 'fee, charge', 'Für die Anmeldung wird eine Gebühr erhoben.', 'sachlich'],
+    ['die', 'Beschwerde', 'Beschwerden', 'queja, reclamación', 'complaint', 'Ich möchte eine Beschwerde einreichen.', ''],
+    ['das', 'Gerät', 'Geräte', 'aparato, dispositivo', 'device, appliance', 'Das Gerät lässt sich nicht einschalten.', ''],
+    ['die', 'Quelle', 'Quellen', 'fuente, manantial', 'source, spring', 'Bitte geben Sie die Quellen an.', 'sachlich'],
+    ['', 'sich auswirken auf', '', 'repercutir en, afectar a', 'to have an effect on', 'Das schlechte Wetter wirkt sich auf die Ernte aus.', 'sachlich'],
+    ['', 'sich beziehen auf', '', 'referirse a', 'to refer to', 'Ich beziehe mich auf Ihre E-Mail vom Montag.', 'sachlich'],
+    ['', 'sich handeln um', '', 'tratarse de', 'to be a matter of', 'Es handelt sich um ein Missverständnis.', 'sachlich'],
+    ['', 'sich konzentrieren auf', '', 'concentrarse en', 'to concentrate on', 'Du musst dich auf die Prüfung konzentrieren.', ''],
+    ['', 'sich beteiligen an', '', 'participar en, contribuir a', 'to participate in', 'Alle Mitarbeiter beteiligen sich an der Aktion.', 'sachlich'],
+    ['', 'sich engagieren für', '', 'comprometerse con, implicarse en', 'to be committed to', 'Sie engagiert sich für den Umweltschutz.', ''],
+    ['', 'sich auskennen mit', '', 'saber de, conocer bien', 'to be well versed in', 'Mit Computern kenne ich mich gut aus.', ''],
+    ['', 'sich verlassen auf', '', 'confiar en, contar con', 'to rely on', 'Auf ihn kann man sich immer verlassen.', ''],
+    ['', 'sich anpassen an', '', 'adaptarse a', 'to adapt to', 'Man muss sich an neue Situationen anpassen.', ''],
+    ['', 'sich entwickeln', '', 'desarrollarse', 'to develop', 'Das Kind entwickelt sich prächtig.', ''],
+    ['', 'sich durchsetzen', '', 'imponerse, salirse con la suya', 'to prevail, to assert oneself', 'Er konnte sich mit seiner Idee durchsetzen.', ''],
+    ['', 'sich befassen mit', '', 'ocuparse de, tratar', 'to deal with', 'Der Ausschuss befasst sich mit dem Thema.', 'sachlich'],
+    ['', 'bedauern', '', 'lamentar', 'to regret', 'Wir bedauern die Unannehmlichkeiten.', 'sachlich'],
+    ['', 'bezweifeln', '', 'dudar de', 'to doubt', 'Ich bezweifle, dass er pünktlich kommt.', ''],
+    ['', 'erwähnen', '', 'mencionar', 'to mention', 'Er hat das Problem nur kurz erwähnt.', ''],
+    ['', 'betonen', '', 'subrayar, enfatizar', 'to emphasise', 'Die Ministerin betonte die Bedeutung der Bildung.', 'sachlich'],
+    ['', 'feststellen', '', 'constatar, darse cuenta', 'to establish, to notice', 'Ich habe festgestellt, dass mein Schlüssel fehlt.', ''],
+    ['', 'verursachen', '', 'causar', 'to cause', 'Der Sturm hat große Schäden verursacht.', ''],
+    ['', 'vermeiden', '', 'evitar', 'to avoid', 'Wir sollten unnötige Kosten vermeiden.', ''],
+    ['', 'fördern', '', 'fomentar, promover', 'to promote, to support', 'Die Stadt fördert junge Künstler.', ''],
+    ['', 'unterstützen', '', 'apoyar', 'to support', 'Meine Familie unterstützt mich bei dem Umzug.', ''],
+    ['', 'ablehnen', '', 'rechazar', 'to reject, to decline', 'Er lehnte das Angebot höflich ab.', ''],
+    ['', 'zustimmen', '', 'estar de acuerdo, aprobar', 'to agree', 'Ich stimme dir völlig zu.', ''],
+    ['', 'widersprechen', '', 'contradecir', 'to contradict', 'Dem muss ich widersprechen.', ''],
+    ['', 'überzeugen', '', 'convencer', 'to convince', 'Das Argument hat mich nicht überzeugt.', ''],
+    ['', 'einschätzen', '', 'evaluar, valorar', 'to assess', 'Wie schätzt du die Lage ein?', ''],
+    ['', 'ausgleichen', '', 'compensar', 'to compensate for', 'Der Sport gleicht die Büroarbeit aus.', ''],
+    ['', 'umsetzen', '', 'llevar a la práctica, implementar', 'to implement', 'Wir wollen den Plan bis Mai umsetzen.', 'sachlich'],
+    ["", "verfügen über", "", "disponer de", "to have at one's disposal", "Die Firma verfügt über moderne Anlagen.", "sachlich"],
+    ['', 'beitragen zu', '', 'contribuir a', 'to contribute to', 'Jeder kann zum Erfolg beitragen.', ''],
+    ['', 'zurückgehen', '', 'disminuir, retroceder', 'to decrease, to go back', 'Die Zahl der Besucher ist zurückgegangen.', 'sachlich'],
+    ['', 'zunehmen', '', 'aumentar', 'to increase', 'Der Verkehr nimmt jedes Jahr zu.', ''],
+    ['', 'zuständig', '', 'competente, responsable', 'responsible, in charge', 'Dafür ist das Bürgeramt zuständig.', 'sachlich'],
+    ['', 'verfügbar', '', 'disponible', 'available', 'Das Produkt ist leider nicht mehr verfügbar.', ''],
+    ['', 'selbstständig', '', 'autónomo, independiente', 'independent, self-employed', 'Sie arbeitet seit zwei Jahren selbstständig.', ''],
+    ['', 'vorsichtig', '', 'cuidadoso, prudente', 'careful, cautious', 'Fahr bitte vorsichtig!', ''],
+    ['', 'gleichzeitig', '', 'al mismo tiempo', 'at the same time, simultaneous', 'Wir können nicht alles gleichzeitig machen.', ''],
+    ['', 'ausreichend', '', 'suficiente', 'sufficient', 'Wir haben ausreichend Zeit.', ''],
+    ['', 'üblich', '', 'habitual, usual', 'usual, customary', 'Das ist bei uns so üblich.', ''],
+    ['', 'offensichtlich', '', 'evidente, obvio', 'obvious, evident', 'Er hat offensichtlich nicht zugehört.', ''],
+    ['', 'zunehmend', '', 'creciente, cada vez más', 'increasing, increasingly', 'Zunehmend mehr Menschen arbeiten von zu Hause.', 'sachlich'],
+    ['', 'vergleichbar', '', 'comparable', 'comparable', 'Die beiden Modelle sind kaum vergleichbar.', ''],
+    ['', 'umstritten', '', 'controvertido, polémico', 'controversial, disputed', 'Das Gesetz ist politisch umstritten.', 'sachlich'],
+    ['', 'befristet', '', 'temporal, de duración limitada', 'temporary, fixed-term', 'Mein Vertrag ist auf ein Jahr befristet.', 'sachlich'],
+    ['', 'dringend', '', 'urgente', 'urgent, urgently', 'Ich muss dringend mit dir sprechen.', ''],
+    ['', 'fließend', '', 'fluido, con fluidez', 'fluent, fluently', 'Sie spricht fließend Deutsch.', ''],
+    ['', 'jedoch', '', 'sin embargo', 'however', 'Er wollte kommen, jedoch fehlte ihm die Zeit.', 'sachlich'],
+    ['', 'somit', '', 'así pues, por lo tanto', 'thus, therefore', 'Alle Bedingungen sind erfüllt, somit steht dem Projekt nichts im Weg.', 'sachlich'],
+    ['', 'folglich', '', 'por consiguiente', 'consequently', 'Er war krank, folglich konnte er nicht kommen.', 'sachlich'],
+    ['', 'anstatt', '', 'en lugar de', 'instead of', 'Anstatt zu lernen, schaut er fern.', ''],
+    ['', 'indem', '', 'al + gerundio, mediante', 'by (doing)', 'Man lernt Sprachen, indem man sie spricht.', ''],
+    ['', 'sofern', '', 'siempre que, en la medida en que', 'provided that, as long as', 'Wir treffen uns, sofern das Wetter gut ist.', 'sachlich'],
+    ['', 'solange', '', 'mientras (que), siempre que', 'as long as', 'Solange du bei mir bist, habe ich keine Angst.', ''],
+    ['', 'seitdem', '', 'desde que, desde entonces', 'since, ever since', 'Seitdem ich hier wohne, fühle ich mich wohl.', ''],
+    ['', 'je … desto', '', 'cuanto más … más', 'the more … the more', 'Je mehr ich übe, desto besser werde ich.', ''],
+    ['', 'weder … noch', '', 'ni … ni', 'neither … nor', 'Er hat weder Zeit noch Lust.', ''],
+    ['', 'wenigstens', '', 'al menos', 'at least', 'Ruf wenigstens kurz an!', ''],
+    ['', 'vielmehr', '', 'más bien', 'rather, on the contrary', 'Er ist nicht faul, vielmehr überlastet.', 'sachlich'],
+    ['', 'beziehungsweise', '', 'o bien, respectivamente', 'or rather, respectively', 'Wir sind zu dritt beziehungsweise zu viert.', ''],
+    ['', 'zudem', '', 'además', 'moreover, in addition', 'Das Zimmer ist klein und zudem laut.', 'sachlich'],
+    ['', 'andererseits', '', 'por otro lado', 'on the other hand', 'Einerseits möchte ich reisen, andererseits fehlt mir das Geld.', '']
+  ] }
 ];
+function seedFields(r, level) {
+  return { article: r[0], de: r[1], plural: r[2], es: r[3], en: r[4], example: r[5], register: r[6], tags: [level] };
+}
+// Fresh install: all three decks.
 function seedDeck() {
-  const t0 = Date.now();
-  SEED.forEach((w, i) => {
-    const reflexive = w[0] === 'sich';
-    addNote({ article: ART.includes(w[0]) ? w[0] : '', de: reflexive ? 'sich ' + w[1] : w[1], plural: w[2], es: w[3], example: w[4], register: w[5], tags: ['C1'] }, 'Alemán::C1', t0 + i);
+  const t0 = Date.now(); let i = 0;
+  SEEDS.forEach(d => { ensureDeck(d.deck); d.rows.forEach(r => addNote(seedFields(r, d.level), d.deck, t0 + i++)); });
+  DB.seeded = true; DB.seedVersion = SEED_VERSION; save();
+}
+// Existing install: add B1/B2, fill missing meanings, set direction default. Never touches scheduling.
+function migrateSeed() {
+  if ((DB.seedVersion || 0) >= SEED_VERSION) return;
+  const byKey = new Map(DB.notes.map(n => [noteKey(n), n])), t0 = Date.now(); let i = 0;
+  SEEDS.forEach(d => {
+    ensureDeck(d.deck);
+    d.rows.forEach(r => {
+      const f = seedFields(r, d.level), ex = byKey.get(noteKey(f));
+      if (ex) { if (!ex.es && f.es) ex.es = f.es; if (!ex.en && f.en) ex.en = f.en; }
+      else if (d.level !== 'C1') { byKey.set(noteKey(f), addNote(f, d.deck, t0 + i++)); }
+    });
   });
-  ensureDeck('Alemán::C1');
-  DB.seeded = true; save();
+  Object.keys(DB.decks).forEach(k => { if (!DB.decks[k].dir) DB.decks[k].dir = 'm2d'; delete DB.decks[k].reverse; });
+  DB.seeded = true; DB.seedVersion = SEED_VERSION; save();
 }
 
 /* =====================================================================
@@ -645,11 +887,11 @@ function seedDeck() {
    ===================================================================== */
 const S = {
   screen: 'decks', deck: '', cur: null, undo: null, dir: 'both',
-  drill: null,
+  drill: null, x: null,
   B: { q: '', sort: 'created', mode: 'cards', quick: [], f: { deck: '', tag: '', state: '', flag: 0 }, select: false, sel: new Set() },
   from: 'decks'
 };
-function go(screen) { S.screen = screen; window.scrollTo(0, 0); render(); }
+function go(screen) { if (screen === 'decks') S.x = null; S.screen = screen; window.scrollTo(0, 0); render(); }
 function render() {
   closeSheet();
   const v = { decks: viewDecks, study: viewStudy, drill: viewDrill, browse: viewBrowse, stats: viewStats, settings: viewSettings }[S.screen];
@@ -700,6 +942,7 @@ function deckMenu(name) {
   sheet(`<h2>${esc(name)}</h2><div class="grp">
     ${rowBtn('study', 'play', 'Estudiar', `data-id="${esc(name)}"`)}
     ${rowBtn('drill', 'select', 'Practicar artículos', `data-id="${esc(name)}"`, 'der / die / das')}
+    ${rowBtn('xmenu', 'undo', 'Estudio extra', `data-id="${esc(name)}"`, 'práctica, adelantar, más nuevas')}
     ${rowBtn('newsub', 'folder', 'Nuevo submazo', `data-id="${esc(name)}"`)}
     ${rowBtn('deckrename', 'gear', 'Renombrar', `data-id="${esc(name)}"`)}
     ${rowBtn('deckopts', 'gear', 'Opciones del mazo', `data-id="${esc(name)}"`)}
@@ -733,8 +976,8 @@ function deckOptsSheet(name) {
   sheet(`<div class="hd"><h2>Opciones: ${esc(name.split('::').pop())}</h2><button data-act="sheet-close">Listo</button></div>
     <label class="fl">Tarjetas nuevas por día</label><input type="number" inputmode="numeric" min="0" max="999" value="${o.newPerDay}" data-ch="dopt" data-k="newPerDay" data-id="${esc(name)}">
     <label class="fl">Máximo de repasos por día</label><input type="number" inputmode="numeric" min="0" max="9999" value="${o.maxRev}" data-ch="dopt" data-k="maxRev" data-id="${esc(name)}">
-    <label class="fl">Tarjeta 2 (ES→DE)</label><label class="chk"><input type="checkbox" ${o.reverse ? 'checked' : ''} data-ch="dopt" data-k="reverse" data-id="${esc(name)}"> Generar tarjeta inversa</label>
-    <div class="note">Se aplica a las tarjetas de este mazo (no a los submazos).</div>`);
+    <label class="fl">Dirección</label><select data-ch="dopt" data-k="dir" data-id="${esc(name)}">${[['m2d', 'Significado → Alemán'], ['d2m', 'Alemán → Significado'], ['both', 'Ambas']].map(x => `<option value="${x[0]}" ${o.dir === x[0] ? 'selected' : ''}>${x[1]}</option>`).join('')}</select>
+    <div class="note">Se aplica a las tarjetas de este mazo (no a los submazos). Las tarjetas ocultas conservan su historial.</div>`);
 }
 
 /* =====================================================================
@@ -744,18 +987,42 @@ function topSeg(active) {
   return `<div class="seg4"><button data-act="go" data-v="decks">Mazos</button><button data-act="addhere">Añadir</button><button data-act="editcur" ${S.cur ? '' : 'style="opacity:.4"'}>Editar</button><button data-act="browse" class="${active === 'browse' ? 'on' : ''}">Explorar</button></div>`;
 }
 const playBtn = (txt, cls) => `<button class="play ${cls || ''}" data-act="speak-text" data-t="${esc(txt)}" aria-label="Escuchar">${ic('play', cls ? 18 : 22)}</button>`;
+function nextCur() {
+  const X = S.x;
+  if (X) {
+    while (X.queue.length) {
+      const c = C(X.queue[0]);
+      if (c && !c.suspended && N(c.nid) && dirOk(c.ord, N(c.nid).deck) && (S.dir === 'both' || String(c.ord) === S.dir)) { S.cur = { cid: c.id, rev: false }; return; }
+      X.queue.shift();
+    }
+    S.cur = null; return;
+  }
+  const c = pickNext(S.deck, S.dir); S.cur = c ? { cid: c.id, rev: false } : null;
+}
+function xRows(deck) {
+  const a = `data-id="${esc(deck)}"`;
+  return rowBtn('xtoday', 'undo', 'Repasar lo de hoy otra vez', a, 'práctica, no cambia el calendario')
+    + rowBtn('xfailed', 'undo', 'Repasar las que fallé hoy', a, 'práctica, no cambia el calendario')
+    + rowBtn('xfree', 'play', 'Práctica libre', a, 'tarjetas al azar, no cambia el calendario')
+    + rowBtn('xnew', 'plus', '+10 nuevas hoy', a, 'sube el límite de hoy y estudia')
+    + rowBtn('xahead', 'chart', 'Estudiar por adelantado', a, 'repasos de los próximos días');
+}
 function viewStudy() {
-  if (!S.cur) { const c = pickNext(S.deck, S.dir); if (c) S.cur = { cid: c.id, rev: false }; }
-  const cnt = counts(S.deck);
+  if (!S.cur) nextCur();
+  const X = S.x, practice = !!(X && X.practice), cnt = counts(S.deck);
   let body, bar = '';
   if (!S.cur) {
-    body = `<div class="done"><h2>Todo listo por hoy</h2><p class="sub" style="color:var(--muted)">No quedan tarjetas pendientes en este mazo.</p><button class="btn" data-act="go" data-v="decks">Volver a Mazos</button></div>`;
-    if (S.undo) bar = `<div class="ansbar"><div class="tools"><button class="tool" data-act="undo" aria-label="Deshacer">${ic('undo')}</button><span></span></div></div>`;
+    if (practice) body = `<div class="done"><h2>Práctica terminada</h2><p style="color:var(--muted)">${X.total - X.missed.size} correctas de ${X.total}</p><button class="btn" data-act="xrepeat">Practicar otra vez</button><button class="btn sec" data-act="go" data-v="decks">Volver a Mazos</button></div>`;
+    else if (X) body = `<div class="done"><h2>Estudio por adelantado terminado</h2><button class="btn" data-act="go" data-v="decks">Volver a Mazos</button></div>`;
+    else body = `<div class="done"><h2>¡Terminado por hoy!</h2><p style="color:var(--muted)">No quedan tarjetas pendientes en este mazo.</p>
+      <div class="grp" style="text-align:left"><h3>Estudio extra</h3>${xRows(S.deck)}</div><button class="btn" data-act="go" data-v="decks">Volver a Mazos</button></div>`;
+    if (S.undo && !practice) bar = `<div class="ansbar"><div class="tools"><button class="tool" data-act="undo" aria-label="Deshacer">${ic('undo')}</button><span></span></div></div>`;
   } else {
     const c = C(S.cur.cid), n = N(c.nid), rev = S.cur.rev, back = c.ord === 0;
     const pic = IMG[n.id] && n.img ? `<img class="pic" src="${IMG[n.id]}" alt="">` : '';
-    const front = back ? `<div class="front">${esc(n.de)} ${playBtn(artWord(n))}</div>`
-      : `<div class="front" style="flex-direction:column;gap:6px">${esc(n.es || n.en)}${n.es && n.en ? `<span style="font-size:22px;color:var(--muted);font-weight:600">${esc(n.en)}</span>` : ''}</div>${pic}`;
+    const mean = ['en', 'es'].filter(k => n[k]).map(k => `<div class="ml"><span class="lg">${k.toUpperCase()}</span> ${esc(n[k])}</div>`).join('');
+    // ord 0: German on the front. ord 1: meaning on the front (no German, no audio).
+    const front = back ? `<div class="front">${esc(n.de)} ${playBtn(artWord(n))}</div>` : `<div class="front mean">${mean}</div>${pic}`;
     const ans = rev ? `<div class="divider"></div><div class="ans">
       <div class="wl">${artHtml(n)} ${playBtn(artWord(n))}</div>
       ${n.plural ? `<div class="pl">Pl.: ${esc(n.plural)}</div>` : ''}
@@ -765,18 +1032,64 @@ function viewStudy() {
       ${back ? pic : ''}</div>` : '';
     body = `<div class="face">${front}${ans}</div>`;
     const flagDot = c.flag ? `<span class="fdot" style="background:${FLAGS[c.flag]}"></span>` : '';
+    const btns = practice
+      ? `<div class="ans4" style="grid-template-columns:1fr 1fr"><button class="ab a1" data-act="grade" data-v="1"><span class="lb" style="font-size:16px">Otra vez</span></button><button class="ab a3" data-act="grade" data-v="3"><span class="lb" style="font-size:16px">Bien</span></button></div>`
+      : `<div class="ans4">${[['a1', 1, 'Otra vez'], ['a2', 2, 'Difícil'], ['a3', 3, 'Bien'], ['a4', 4, 'Fácil']].map(b => `<button class="ab ${b[0]}" data-act="grade" data-v="${b[1]}"><span class="iv num">${label(c, b[1])}</span><span class="lb">${b[2]}</span></button>`).join('')}</div>`;
     bar = `<div class="ansbar"><div class="tools">
-      ${S.undo ? `<button class="tool" data-act="undo" aria-label="Deshacer">${ic('undo')}</button>` : '<span></span>'}
+      ${S.undo && !practice ? `<button class="tool" data-act="undo" aria-label="Deshacer">${ic('undo')}</button>` : '<span></span>'}
       <button class="tool" data-act="sessmenu" aria-label="Opciones">${flagDot || ic('gear')}</button></div>
-      ${rev ? `<div class="ans4">${[['a1', 1, 'Otra vez'], ['a2', 2, 'Difícil'], ['a3', 3, 'Bien'], ['a4', 4, 'Fácil']].map(b => `<button class="ab ${b[0]}" data-act="grade" data-v="${b[1]}"><span class="iv num">${label(c, b[1])}</span><span class="lb">${b[2]}</span></button>`).join('')}</div>`
-        : `<button class="showbtn" data-act="reveal">Mostrar respuesta</button>`}</div>`;
+      ${rev ? btns : `<button class="showbtn" data-act="reveal">Mostrar respuesta</button>`}</div>`;
   }
-  return `<div class="study">${topSeg('')}<div class="cnt num"><span class="cn">${cnt.n}</span> + <span class="cl">${cnt.l}</span> + <span class="cr">${cnt.r}</span></div>${body}${bar}</div>`;
+  const head = practice ? `<span class="badge">Práctica</span> <span class="num">${X.queue.length} restantes</span>`
+    : X ? `<span class="badge">Por adelantado</span> <span class="num">${X.queue.length} restantes</span>`
+    : `<span class="cn">${cnt.n}</span> + <span class="cl">${cnt.l}</span> + <span class="cr">${cnt.r}</span>`;
+  return `<div class="study">${topSeg('')}<div class="cnt num">${head}</div>${body}${bar}</div>`;
 }
-function startStudy(deck) { S.deck = deck; S.cur = null; S.undo = null; go('study'); }
-function reveal() { if (S.cur && !S.cur.rev) { S.cur.rev = true; render(); } }
+function startX(mode, param) {
+  const root = S.deck, today = dayNum();
+  const cs = activeCards().filter(c => inDeck(N(c.nid).deck, root) && !c.suspended);
+  let q = [];
+  if (mode === 'today' || mode === 'failed') {
+    const ids = new Set();
+    for (let i = DB.log.length - 1; i >= 0 && DB.log[i].day === today; i--) {
+      const e = DB.log[i]; if (e.practice || (mode === 'failed' && e.q !== 1)) continue; ids.add(e.cid);
+    }
+    q = shuffle(cs.filter(c => ids.has(c.id)).map(c => c.id));
+  } else if (mode === 'free') { q = shuffle(cs.map(c => c.id)); if (param) q = q.slice(0, param); }
+  else if (mode === 'ahead') q = cs.filter(c => c.state === 'review' && c.dueDay > today && c.dueDay <= today + param).sort((a, b) => a.dueDay - b.dueDay).map(c => c.id);
+  if (!q.length) { toast('No hay tarjetas para esta opción'); return; }
+  S.x = { mode, param, practice: mode !== 'ahead', queue: q, total: q.length, missed: new Set() };
+  S.cur = null; S.undo = null; go('study');
+}
+// Raise today's new-card limit by 10 (spread over the leaf decks that still have new cards).
+function addNewToday(root) {
+  const today = dayNum(); if (!DB.bonus || DB.bonus.day !== today) DB.bonus = { day: today, d: {} };
+  const done = todayDone(), act = activeCards(); let left = 10;
+  [...new Set(act.map(c => N(c.nid).deck).filter(d => inDeck(d, root)))].sort().forEach(d => {
+    if (left <= 0) return;
+    const avail = act.filter(c => N(c.nid).deck === d && c.state === 'new' && !c.suspended && c.buryDay !== today).length;
+    const pending = Math.max(0, avail - Math.max(0, newLimit(d) - (done[d] || { n: 0 }).n)), g = Math.min(left, pending);
+    if (g > 0) { DB.bonus.d[d] = (DB.bonus.d[d] || 0) + g; left -= g; }
+  });
+  if (left === 10) { toast('No hay más tarjetas nuevas'); return false; }
+  save(); return true;
+}
+function gradePractice(q) {
+  const X = S.x, c = C(S.cur.cid), n = N(c.nid);
+  DB.log.push({ t: Date.now(), day: dayNum(), cid: c.id, deck: n.deck, q, from: 'practice', ivl: c.ivl, practice: 1 });
+  const i = X.queue.indexOf(c.id); if (i >= 0) X.queue.splice(i, 1);
+  if (q === 1) { X.missed.add(c.id); X.queue.splice(Math.min(3, X.queue.length), 0, c.id); }
+  save(); S.cur = null; render();
+}
+function startStudy(deck) { S.deck = deck; S.x = null; S.cur = null; S.undo = null; go('study'); }
+function reveal() {
+  if (!S.cur || S.cur.rev) return;
+  S.cur.rev = true; render();
+  if (DB.settings.autoSpeak) speak(artWord(N(C(S.cur.cid).nid)));
+}
 function grade(q) {
   if (!S.cur || !S.cur.rev) return;
+  if (S.x && S.x.practice) { gradePractice(q); return; }
   const c = C(S.cur.cid), n = N(c.nid), today = dayNum();
   const snap = { card: Object.assign({}, c), tags: n.tags.slice(), logLen: DB.log.length, sib: [], days: DB.days.slice(-1)[0] };
   const from = c.state;
@@ -784,11 +1097,12 @@ function grade(q) {
   DB.log.push({ t: Date.now(), day: today, cid: c.id, deck: n.deck, q, from, ivl: c.ivl });
   if (!DB.days.includes(today)) DB.days.push(today);
   DB.cards.forEach(s => {
-    if (s.nid === c.nid && s.id !== c.id && !s.suspended && (s.state === 'new' || s.state === 'review')) { snap.sib.push({ id: s.id, b: s.buryDay }); s.buryDay = today; }
+    if (s.nid === c.nid && s.id !== c.id && !s.suspended && (s.state === 'new' || s.state === 'review') && dirOk(s.ord, n.deck)) { snap.sib.push({ id: s.id, b: s.buryDay }); s.buryDay = today; }
   });
   if (q === 1 && from === 'review' && c.lapses >= 8 && (c.lapses - 8) % 4 === 0) {
     c.suspended = true; if (!n.tags.includes('leech')) n.tags.push('leech'); toast('Sanguijuela: tarjeta suspendida');
   }
+  if (S.x) S.x.queue = S.x.queue.filter(id => id !== c.id);
   save(); S.undo = snap; S.cur = null; render();
 }
 function undo() {
@@ -815,13 +1129,13 @@ function sessMenu() {
 
 /* ---- article drill ---- */
 function drillPool(deck) {
-  const today = dayNum(), now = Date.now();
-  const nouns = DB.cards.filter(c => c.ord === 0 && !c.suspended && N(c.nid) && inDeck(N(c.nid).deck, deck) && ART.includes(N(c.nid).article));
+  const today = dayNum(), now = Date.now(), seen = new Set();
+  const nouns = activeCards().filter(c => !c.suspended && inDeck(N(c.nid).deck, deck) && ART.includes(N(c.nid).article));
   if (DB.settings.drillAffects) {
     const due = nouns.filter(c => c.state === 'new' || (c.state === 'review' && c.dueDay <= today) || (isLearn(c) && c.due <= now));
     if (due.length) return { list: due, affect: true };
   }
-  return { list: nouns, affect: false };
+  return { list: nouns.filter(c => !seen.has(c.nid) && seen.add(c.nid)), affect: false };
 }
 function drillNext() {
   const D = S.drill, p = drillPool(D.deck); D.affect = p.affect;
@@ -924,7 +1238,7 @@ async function noteSave() {
 const QUICK = [['due', 'Pendientes'], ['added', 'Añadidas hoy'], ['studied', 'Estudiadas hoy'], ['again', 'Otra vez hoy'], ['flag', 'Con bandera'], ['susp', 'Suspendidas'], ['leech', 'Sanguijuelas'], ['marked', 'Marcadas']];
 function browseRows() {
   const B = S.B, today = dayNum(), eod = endOfToday(), studied = new Set(), again = new Set();
-  for (let i = DB.log.length - 1; i >= 0 && DB.log[i].day === today; i--) { studied.add(DB.log[i].cid); if (DB.log[i].q === 1) again.add(DB.log[i].cid); }
+  for (let i = DB.log.length - 1; i >= 0 && DB.log[i].day === today; i--) { if (DB.log[i].practice) continue; studied.add(DB.log[i].cid); if (DB.log[i].q === 1) again.add(DB.log[i].cid); }
   const Q = {
     due: c => !c.suspended && ((c.state === 'review' && c.dueDay <= today) || (isLearn(c) && c.due <= eod)),
     added: (c, n) => dayNum(n.created) === today, studied: c => studied.has(c.id), again: c => again.has(c.id),
@@ -961,7 +1275,7 @@ function browseList() {
       ${B.select ? `<span class="sel ${sel ? 'on' : ''}">${sel ? ic('check', 16) : ''}</span>` : ''}
       <button class="spk" data-act="speak-text" data-t="${esc(artWord(n))}" aria-label="Escuchar">${ic('speaker', 18)}</button>
       <div style="min-width:0;flex:1"><div class="w">${artHtml(n)}</div><div class="m">${esc(meaningText(n))}</div>
-      <div class="meta"><span>${esc(n.deck)}</span><span>· Tarjeta ${c.ord + 1}/2</span>${c.flag ? `<span class="fdot" style="background:${FLAGS[c.flag]}"></span>` : ''}${c.suspended ? '<span>· Susp.</span>' : ''}${n.marked ? '<span>· ★</span>' : ''}${n.tags.map(t => `<span class="tagc">${esc(t)}</span>`).join('')}</div></div></div>`;
+      <div class="meta"><span>${esc(n.deck)}</span><span>· ${cardLabel(c, n)}</span>${c.flag ? `<span class="fdot" style="background:${FLAGS[c.flag]}"></span>` : ''}${c.suspended ? '<span>· Susp.</span>' : ''}${n.marked ? '<span>· ★</span>' : ''}${n.tags.map(t => `<span class="tagc">${esc(t)}</span>`).join('')}</div></div></div>`;
   }).join('') || '<div class="empty">Sin resultados</div>' };
 }
 const savedName = s => s.name;
@@ -1000,9 +1314,10 @@ function bars(vals, labels, color) {
 }
 function viewStats() {
   const today = dayNum(), eod = endOfToday(), now = Date.now();
-  const byDay = new Array(30).fill(0); let tN = 0, tOk = 0, rN = 0, rOk = 0;
+  const byDay = new Array(30).fill(0); let tN = 0, tOk = 0, rN = 0, rOk = 0, pr = 0;
   DB.log.forEach(e => {
     const a = today - e.day; if (a < 0 || a > 29) return;
+    if (e.practice) { if (a === 0) pr++; return; }
     byDay[29 - a]++;
     if (a === 0) { tN++; if (e.q > 1) tOk++; }
     if (e.from === 'review') { rN++; if (e.q > 1) rOk++; }
@@ -1016,7 +1331,7 @@ function viewStats() {
   });
   const dl = off => { const d = new Date(now + off * DAY_MS); return d.getDate() + '/' + (d.getMonth() + 1); };
   return `<div class="bar"><div class="pill l"><button data-act="go" data-v="decks" aria-label="Volver">${ic('back')}</button></div><h1>Estadísticas</h1><span></span></div><div class="scr">
-    <div class="grp"><h3>Hoy</h3><div class="stat3"><div><b class="num">${tN}</b><span>repasos</span></div><div><b class="num">${tN ? Math.round(tOk / tN * 100) + '%' : '–'}</b><span>acierto</span></div><div><b class="num">${rN ? Math.round(rOk / rN * 100) + '%' : '–'}</b><span>retención 30 d</span></div></div></div>
+    <div class="grp"><h3>Hoy</h3><div class="stat3" style="grid-template-columns:repeat(4,1fr)"><div><b class="num">${tN}</b><span>repasos</span></div><div><b class="num">${tN ? Math.round(tOk / tN * 100) + '%' : '–'}</b><span>acierto</span></div><div><b class="num">${rN ? Math.round(rOk / rN * 100) + '%' : '–'}</b><span>retención</span></div><div><b class="num">${pr}</b><span>práctica</span></div></div></div>
     <div class="grp"><h3>Últimos 30 días</h3><div style="padding:6px 14px 12px">${bars(byDay, [dl(-29), 'hoy'], 'var(--accent)')}</div></div>
     <div class="grp"><h3>Previsión 14 días</h3><div style="padding:6px 14px 12px">${bars(fc, ['hoy', dl(13)], 'var(--rev)')}</div></div>
     <div class="grp"><h3>Tarjetas por estado</h3>
@@ -1047,6 +1362,7 @@ function viewSettings() {
       <label class="fl">Voz alemana</label><select data-ch="set" data-k="voice"><option value="">Automática</option>${vs.map(v => `<option value="${esc(v.name)}" ${S_.voice === v.name ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('')}</select>
       ${vs.length ? '' : '<div class="note">Este dispositivo no muestra voces alemanas. Instálalas en Ajustes > Accesibilidad > Contenido hablado.</div>'}
       <label class="fl">Velocidad: <span id="ratev">${S_.rate}</span></label><input type="range" min="0.5" max="1.3" step="0.05" value="${S_.rate}" data-in="rate">
+      <label class="chk" style="margin-top:14px"><input type="checkbox" ${S_.autoSpeak ? 'checked' : ''} data-ch="set" data-k="autoSpeak"> Leer en voz alta al mostrar respuesta</label>
       <button class="btn sec" data-act="speak-text" data-t="Die Nachhaltigkeit spielt eine große Rolle.">${ic('speaker', 20)} Probar</button></div></div>
     <div class="grp"><h3>Práctica de artículos</h3><div style="padding:12px 16px"><label class="chk"><input type="checkbox" ${S_.drillAffects ? 'checked' : ''} data-ch="set" data-k="drillAffects"> El ejercicio der/die/das afecta al calendario</label></div></div></div>`;
 }
@@ -1090,6 +1406,7 @@ async function restoreBackup(file) {
     if (!confirm(`Restaurar ${d.notes.length} notas y ${d.cards.length} tarjetas? Se sustituye lo actual.`)) return;
     const imgs = d.images || {}; delete d.images;
     DB = Object.assign(defaultDB(), d); DB.settings = Object.assign(defaultDB().settings, d.settings || {});
+    migrateSeed();
     await imgClear(); for (const k of Object.keys(imgs)) await imgPut(k, imgs[k]);
     save(); applyTheme(); S.cur = null; S.undo = null; go('decks'); toast('Copia restaurada');
   } catch (e) { toast('Archivo de copia no válido'); }
@@ -1209,6 +1526,15 @@ const A = {
   suspcur: () => { C(S.cur.cid).suspended = true; save(); S.cur = null; S.undo = null; render(); toast('Tarjeta suspendida'); },
   burycur: () => { C(S.cur.cid).buryDay = dayNum(); save(); S.cur = null; S.undo = null; render(); toast('Enterrada hasta mañana'); },
   burynote: () => { const nid = C(S.cur.cid).nid; DB.cards.forEach(c => { if (c.nid === nid) c.buryDay = dayNum(); }); save(); S.cur = null; S.undo = null; render(); toast('Nota enterrada hasta mañana'); },
+  xmenu: el => { S.deck = el.dataset.id; sheet(`<h2>Estudio extra</h2><div class="grp">${xRows(S.deck)}</div>`); },
+  xtoday: el => { S.deck = el.dataset.id; startX('today'); },
+  xfailed: el => { S.deck = el.dataset.id; startX('failed'); },
+  xfree: el => { S.deck = el.dataset.id; pickSheet('Práctica libre: ¿cuántas tarjetas?', [[10, '10'], [20, '20'], [50, '50'], [0, 'Todas']], 20, 'xfreego'); },
+  xfreego: el => startX('free', +el.dataset.v),
+  xnew: el => { S.deck = el.dataset.id; if (addNewToday(S.deck)) startStudy(S.deck); },
+  xahead: el => { S.deck = el.dataset.id; pickSheet('Estudiar por adelantado', [[1, 'Próximo día'], [3, 'Próximos 3 días'], [7, 'Próximos 7 días']], 3, 'xaheadgo'); },
+  xaheadgo: el => startX('ahead', +el.dataset.v),
+  xrepeat: () => { if (S.x) startX(S.x.mode, S.x.param); },
   'speak-text': el => speak(el.dataset.t),
   noteSave, notedel: el => { if (confirm('¿Eliminar esta nota y sus dos tarjetas?')) { deleteNote(el.dataset.id); S.cur = null; save(); render(); toast('Eliminada'); } },
   artset: el => { F.article = el.dataset.v; document.querySelectorAll('#f-art button').forEach(b => { b.className = b.dataset.v === F.article ? 'on ' + b.dataset.v : ''; }); },
@@ -1257,12 +1583,12 @@ const INP = {
   rate: el => { DB.settings.rate = parseFloat(el.value); $('#ratev').textContent = el.value; save(); }
 };
 const CH = {
-  dopt: el => { const k = el.dataset.k, o = DB.decks[el.dataset.id] || (DB.decks[el.dataset.id] = defaultOpts()); o[k] = k === 'reverse' ? el.checked : Math.max(0, parseInt(el.value, 10) || 0); save(); },
+  dopt: el => { const k = el.dataset.k, o = DB.decks[el.dataset.id] || (DB.decks[el.dataset.id] = defaultOpts()); o[k] = k === 'dir' ? el.value : Math.max(0, parseInt(el.value, 10) || 0); save(); },
   set: el => {
     const k = el.dataset.k, s = DB.settings;
     if (k === 'steps') { const p = parseSteps(el.value); s.steps = p.length && /\d/.test(el.value) ? el.value.trim() : '1m 10m'; el.value = s.steps; }
     else if (k === 'grad' || k === 'easy') s[k] = Math.max(1, parseInt(el.value, 10) || 1);
-    else if (k === 'drillAffects') s[k] = el.checked;
+    else if (el.type === 'checkbox') s[k] = el.checked;
     else s[k] = el.value;
     save();
   },
@@ -1303,8 +1629,7 @@ try { if (window.speechSynthesis) speechSynthesis.onvoiceschanged = () => { if (
    ===================================================================== */
 async function boot() {
   load();
-  if (!DB.seeded && !DB.notes.length) seedDeck(); else { DB.seeded = true; }
-  ensureDeck('Alemán::C1'); if (!DB.notes.length && !Object.keys(DB.decks).length) ensureDeck('Alemán::C1');
+  if (!DB.seeded && !DB.notes.length) seedDeck(); else migrateSeed();
   applyTheme();
   render();
   if (await idbOpen()) { await imgLoadAll(); if (S.screen === 'study') render(); }

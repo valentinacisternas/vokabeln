@@ -33,3 +33,5 @@ die Frau (pl. Frauen);mujer
 Each note creates two cards (DE→ES and ES→DE). "Pegar lista" turns a pasted list (one entry per line, e.g. from iPhone Live Text) into cards, with a preview and an ES/EN meaning toggle per row. Images are kept in IndexedDB.
 
 Export creates a JSON backup of cards and progress; the same file can be restored from Copia.
+
+Cards: each note has a German→meaning card and a meaning→German card; the deck option "Dirección" (default meaning→German) decides which are shown. "Estudio extra" (deck menu or the end-of-day screen) offers practice sessions that do not touch the schedule, extra new cards for today and studying ahead. Seed decks: Alemán::B1, B2 and C1.
