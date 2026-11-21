@@ -108,7 +108,9 @@
 
   /* study */
   .study { display:flex; flex-direction:column; min-height:calc(100vh - 8px); }
-  .cnt { text-align:center; font-size:14px; margin:6px 0 0; }
+  .cnt { text-align:center; font-size:14px; margin:6px 0 0; position:relative; min-height:34px; display:flex; align-items:center; justify-content:center; gap:4px; }
+  .xbtn { position:absolute; right:12px; top:50%; transform:translateY(-50%); width:34px; height:34px; border-radius:50%; background:var(--row); color:var(--muted); display:flex; align-items:center; justify-content:center; }
+  .quit p { margin:4px 4px 14px; color:var(--muted); }
   .face { flex:1; padding:22px 20px 230px; text-align:center; }
   .front { font-size:34px; font-weight:700; line-height:1.2; word-break:break-word; display:flex; align-items:center; justify-content:center; gap:12px; flex-wrap:wrap; margin-top:12px; }
   .play { width:46px; height:46px; border-radius:50%; background:var(--accent); color:#fff; display:inline-flex; align-items:center; justify-content:center; flex:none; }
@@ -219,6 +221,7 @@ const IC = {
   chev: '<path d="M9 5l7 7-7 7"/>', chevd: '<path d="M5 9l7 7 7-7"/>', back: '<path d="M15 5l-7 7 7 7"/>',
   play: '<path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none"/>',
   speaker: '<path d="M4 10v4h4l5 4V6L8 10H4z" fill="currentColor" stroke="none"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>',
+  close: '<path d="M6 6l12 12M18 6L6 18"/>',
   undo: '<path d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
   dots: '<circle cx="5" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.7" fill="currentColor" stroke="none"/>',
   star: '<path d="M12 3.5l2.7 5.6 6.1.8-4.5 4.2 1.1 6-5.4-3-5.4 3 1.1-6-4.5-4.2 6.1-.8z"/>',
@@ -511,7 +514,7 @@ function speak(text) {
 /* =====================================================================
    7. IMPORT / EXPORT PARSING
    ===================================================================== */
-const APP_VERSION = 7; // keep in step with CACHE in sw.js
+const APP_VERSION = 8; // keep in step with CACHE in sw.js
 function stripHtml(s) {
   return String(s || '').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
@@ -1095,7 +1098,7 @@ function viewStudy() {
   const head = practice ? `<span class="badge">Práctica</span> <span class="num">${X.queue.length} restantes</span>`
     : X ? `<span class="badge">Por adelantado</span> <span class="num">${X.queue.length} restantes</span>`
     : `<span class="cn">${cnt.n}</span> + <span class="cl">${cnt.l}</span> + <span class="cr">${cnt.r}</span>`;
-  return `<div class="study">${topSeg('')}<div class="cnt num">${head}</div>${body}${bar}</div>`;
+  return `<div class="study">${topSeg('')}<div class="cnt num">${head}<button class="xbtn" data-act="quitask" aria-label="Terminar">${ic('close', 18)}</button></div>${body}${bar}</div>`;
 }
 function startX(mode, param) {
   const root = S.deck, today = dayNum();
@@ -1593,6 +1596,15 @@ const A = {
   xaheadgo: el => startX('ahead', +el.dataset.v),
   xrepeat: () => { if (S.x) startX(S.x.mode, S.x.param); },
   'speak-text': el => speak(el.dataset.t),
+  quitask: () => {
+    const X = S.x, today = dayNum();
+    const done = X && X.practice ? X.total - X.queue.length : DB.log.filter(e => e.day === today && !e.practice && inDeck(e.deck, S.deck)).length;
+    const left = X ? X.queue.length : (c => c.n + c.l + c.r)(counts(S.deck));
+    sheet(`<div class="quit"><div class="hd"><h2>¿Terminar por ahora?</h2></div>
+      <p>${X && X.practice ? `Llevas ${done} de ${X.total} en esta práctica.` : `Hoy llevas ${done} tarjetas en este mazo${left ? `; quedan ${left}` : ''}.`} Tu progreso ya está guardado.</p>
+      <button class="btn" data-act="quitgo">Salir a Mazos</button><button class="btn sec" data-act="sheet-close">Seguir estudiando</button></div>`);
+  },
+  quitgo: () => { closeSheet(); if (window.speechSynthesis) speechSynthesis.cancel(); S.x = null; S.cur = null; S.undo = null; go('decks'); },
   hint: () => {
     if (!S.cur || S.cur.rev) return;
     const total = [...artWord(N(C(S.cur.cid).nid))].filter(ch => /[\p{L}\p{N}]/u.test(ch)).length;
