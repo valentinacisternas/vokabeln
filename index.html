@@ -81,6 +81,9 @@
   .deckrow .ct { font-size:12.5px; color:var(--muted); margin-top:2px; }
   .deckrow .more { width:40px; height:40px; flex:none; display:flex; align-items:center; justify-content:center; color:var(--muted); }
   .cn { color:var(--new); font-weight:700; } .cl { color:var(--learn); font-weight:700; } .cr { color:var(--rev); font-weight:700; }
+  .bkb { margin:12px 0; padding:14px; border-radius:16px; background:var(--row); border:1px solid var(--line); font-size:14px; line-height:1.4; }
+  .bkb b { font-size:15px; } .bkb .grow div { color:var(--muted); margin-top:2px; }
+  .bkbtns { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; } .bkbtns .btn { margin:0; min-height:42px; font-size:15px; }
   .empty { text-align:center; color:var(--muted); padding:48px 20px; }
 
   /* inputs */
@@ -514,7 +517,7 @@ function speak(text) {
 /* =====================================================================
    7. IMPORT / EXPORT PARSING
    ===================================================================== */
-const APP_VERSION = 9; // keep in step with CACHE in sw.js
+const APP_VERSION = 10; // keep in step with CACHE in sw.js
 function stripHtml(s) {
   return String(s || '').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
@@ -1206,7 +1209,7 @@ function viewDecks() {
     `<div class="empty">No hay mazos todavía.<br>Pulsa Añadir/Exportar para crear uno.</div>`;
   return `<div class="bar"><div class="pill l"><button data-act="go" data-v="stats" aria-label="Estadísticas">${ic('chart')}</button></div><h1>Mazos</h1>
     <div class="pill r"><button data-act="browse" aria-label="Buscar">${ic('search')}</button><button data-act="go" data-v="settings" aria-label="Ajustes">${ic('gear')}</button></div></div>
-    <div class="scr">${list}</div>
+    <div class="scr">${backupBanner()}${list}</div>
     <div class="bottom"><div class="pill txt"><button data-act="addmenu">${ic('plus', 20)} Añadir/Exportar</button></div><div class="pill txt"><button data-act="backupmenu">${ic('backup', 20)} Copia</button></div></div>`;
 }
 function deckMenu(name) {
@@ -1648,6 +1651,7 @@ function viewSettings() {
       <label class="fl">Velocidad: <span id="ratev">${S_.rate}</span></label><input type="range" min="0.5" max="1.3" step="0.05" value="${S_.rate}" data-in="rate">
       <label class="chk" style="margin-top:14px"><input type="checkbox" ${S_.autoSpeak ? 'checked' : ''} data-ch="set" data-k="autoSpeak"> Leer en voz alta al mostrar respuesta</label>
       <button class="btn sec" data-act="speak-text" data-t="Die Nachhaltigkeit spielt eine große Rolle.">${ic('speaker', 20)} Probar</button></div></div>
+    <div class="grp"><h3>Copia de seguridad</h3><div style="padding:4px 14px 14px"><label class="fl">Recordarme hacer una copia</label><select data-ch="set" data-k="backupEvery">${[[3, 'Cada 3 días'], [7, 'Cada semana'], [14, 'Cada 2 semanas'], [30, 'Cada mes'], [0, 'Nunca']].map(o => `<option value="${o[0]}" ${(S_.backupEvery === undefined ? 7 : +S_.backupEvery) === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></div></div>
     <div class="grp"><h3>Práctica de artículos</h3><div style="padding:12px 16px"><label class="chk"><input type="checkbox" ${S_.drillAffects ? 'checked' : ''} data-ch="set" data-k="drillAffects"> El ejercicio der/die/das afecta al calendario</label></div></div>
     <div class="note" style="text-align:center;padding:8px 16px 24px">Versión ${APP_VERSION}</div></div>`;
 }
@@ -1664,7 +1668,8 @@ function addMenu() {
     ${rowBtn('exporttxt', 'export', 'Exportar a TXT', '', 'separado por tabuladores')}</div>`);
 }
 function backupMenu() {
-  sheet(`<h2>Copia de seguridad</h2><div class="grp">
+  const lb = DB.settings.lastBackup;
+  sheet(`<h2>Copia de seguridad</h2><div class="note" style="margin:0 4px 10px">Última copia: ${lb ? new Date(lb).toLocaleDateString('es') : 'nunca'}. Guárdala en Archivos o iCloud Drive.</div><div class="grp">
     ${rowBtn('exportjson', 'backup', 'Descargar copia (JSON)', '', 'tarjetas, progreso e imágenes')}
     <label class="row" style="cursor:pointer"><span class="ico">${ic('backup')}</span><span class="grow">Restaurar copia<div class="sub">sustituye todo lo actual</div></span><input type="file" accept=".json,application/json" data-ch="restore" style="display:none"></label>
     ${rowBtn('resetprog', 'undo', 'Reiniciar progreso', '', 'las tarjetas se conservan')}</div>`);
@@ -1699,6 +1704,19 @@ async function restoreBackup(file) {
 function exportJson() {
   const out = Object.assign({}, DB, { images: IMG, app: 'vokabeln', exported: new Date().toISOString() });
   download('vokabeln-copia-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(out), 'application/json');
+  DB.settings.lastBackup = Date.now(); DB.settings.backupSnooze = 0; save(); closeSheet(); render();
+}
+// Backup reminder: shown on the deck list when the last copy is older than the chosen number of days.
+function backupDue() {
+  const st = DB.settings, every = st.backupEvery === undefined ? 7 : +st.backupEvery;
+  if (!every || !DB.log.length || (st.backupSnooze || 0) >= dayNum()) return null;
+  const days = st.lastBackup ? Math.floor((Date.now() - st.lastBackup) / 864e5) : null;
+  return days === null || days >= every ? { days } : null;
+}
+function backupBanner() {
+  const b = backupDue(); if (!b) return '';
+  return `<div class="bkb"><div class="grow"><b>Haz una copia de seguridad</b><div>${b.days === null ? 'Todavía no tienes ninguna copia.' : `Tu última copia es de hace ${b.days} días.`} Si se borran los datos de Safari, pierdes tu progreso.</div></div>
+    <div class="bkbtns"><button class="btn" data-act="exportjson">Hacer copia</button><button class="btn sec" data-act="bksnooze">Mañana</button></div></div>`;
 }
 
 
@@ -1821,6 +1839,7 @@ const A = {
   xaheadgo: el => startX('ahead', +el.dataset.v),
   xrepeat: () => { if (S.x) startX(S.x.mode, S.x.param); },
   'speak-text': el => speak(el.dataset.t),
+  bksnooze: () => { DB.settings.backupSnooze = dayNum(); save(); render(); },
   quitask: () => {
     const X = S.x, today = dayNum();
     const done = X && X.practice ? X.total - X.queue.length : DB.log.filter(e => e.day === today && !e.practice && inDeck(e.deck, S.deck)).length;
@@ -1888,6 +1907,7 @@ const CH = {
     if (k === 'steps') { const p = parseSteps(el.value); s.steps = p.length && /\d/.test(el.value) ? el.value.trim() : '1m 10m'; el.value = s.steps; }
     else if (k === 'grad' || k === 'easy') s[k] = Math.max(1, parseInt(el.value, 10) || 1);
     else if (el.type === 'checkbox') s[k] = el.checked;
+    else if (k === 'backupEvery') s[k] = parseInt(el.value, 10) || 0;
     else s[k] = el.value;
     save();
   },
