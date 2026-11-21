@@ -84,6 +84,10 @@
   .bkb { margin:12px 0; padding:14px; border-radius:16px; background:var(--row); border:1px solid var(--line); font-size:14px; line-height:1.4; }
   .bkb b { font-size:15px; } .bkb .grow div { color:var(--muted); margin-top:2px; }
   .bkbtns { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; } .bkbtns .btn { margin:0; min-height:42px; font-size:15px; }
+  .rule { display:flex; align-items:flex-start; gap:8px; margin:10px auto 2px; padding:8px 12px; border-radius:12px; background:var(--row); color:var(--ink2, var(--ink)); font-size:14px; line-height:1.35; text-align:left; max-width:440px; }
+  .rule.exc { border:1px dashed var(--muted); }
+  .rd { flex:none; width:8px; height:8px; border-radius:50%; margin-top:6px; } .rd.der { background:var(--der); } .rd.die { background:var(--die); } .rd.das { background:var(--das); }
+  .rr .val { color:var(--muted); font-size:14px; text-align:right; max-width:55%; } .rr b { font-weight:600; font-size:15px; }
   .empty { text-align:center; color:var(--muted); padding:48px 20px; }
 
   /* inputs */
@@ -517,7 +521,7 @@ function speak(text) {
 /* =====================================================================
    7. IMPORT / EXPORT PARSING
    ===================================================================== */
-const APP_VERSION = 10; // keep in step with CACHE in sw.js
+const APP_VERSION = 11; // keep in step with CACHE in sw.js
 function stripHtml(s) {
   return String(s || '').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]*>/g, '')
     .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
@@ -1168,7 +1172,7 @@ const S = {
 function go(screen) { if (screen === 'decks') S.x = null; S.screen = screen; window.scrollTo(0, 0); render(); }
 function render() {
   closeSheet();
-  const v = { decks: viewDecks, study: viewStudy, drill: viewDrill, browse: viewBrowse, stats: viewStats, settings: viewSettings }[S.screen];
+  const v = { decks: viewDecks, study: viewStudy, drill: viewDrill, rules: viewRules, browse: viewBrowse, stats: viewStats, settings: viewSettings }[S.screen];
   $('#app').innerHTML = v();
 }
 function sheet(html, full) {
@@ -1301,6 +1305,7 @@ function viewStudy() {
     const ans = rev ? `<div class="divider"></div><div class="ans">
       <div class="wl">${artHtml(n)} ${playBtn(artWord(n))}</div>
       ${n.plural ? `<div class="pl">Pl.: ${esc(n.plural)}</div>` : ''}
+      ${ruleHtml(n)}
       ${back ? meaningHtml(n) : ''}
       ${n.example ? `<div class="ex"><span>${esc(n.example)}</span>${playBtn(n.example, 'sm')}</div>` : ''}
       <div class="bd">${n.register ? `<span class="badge">${esc(n.register)}</span> ` : ''}${n.tags.map(t => `<span class="tagc">${esc(t)}</span>`).join(' ')}</div>
@@ -1437,11 +1442,11 @@ function viewDrill() {
     const n = N(C(D.cid).nid), ok = D.choice === n.article;
     body = `<div class="face" style="padding-bottom:40px"><div class="front">${esc(n.de)} ${playBtn(artWord(n))}</div>
       <div class="dbtns">${ART.map(a => `<button class="db ${a} ${D.choice && a !== n.article && a !== D.choice ? 'dim' : ''} ${D.choice && a === D.choice && !ok ? 'bad dim' : ''}" data-act="drillpick" data-v="${a}" ${D.choice ? 'disabled' : ''}>${a}</button>`).join('')}</div>
-      ${D.choice ? `<div class="ans"><div class="divider"></div><div class="wl">${ok ? '✓' : '✗'} ${artHtml(n)}</div>${n.plural ? `<div class="pl">Pl.: ${esc(n.plural)}</div>` : ''}${meaningHtml(n)}
+      ${D.choice ? `<div class="ans"><div class="divider"></div><div class="wl">${ok ? '✓' : '✗'} ${artHtml(n)}</div>${n.plural ? `<div class="pl">Pl.: ${esc(n.plural)}</div>` : ''}${ok ? '' : ruleHtml(n)}${meaningHtml(n)}
         ${n.example ? `<div class="ex"><span>${esc(n.example)}</span></div>` : ''}<button class="btn" data-act="drillnext">Siguiente</button></div>` : ''}
       <div class="note">${D.ok} correctas · ${D.bad} falladas${D.affect ? ' · afecta al calendario' : ''}</div></div>`;
   }
-  return `<div class="bar"><div class="pill l"><button data-act="go" data-v="decks" aria-label="Volver">${ic('back')}</button></div><h1>Artículos</h1><span></span></div>${body}`;
+  return `<div class="bar"><div class="pill l"><button data-act="go" data-v="decks" aria-label="Volver">${ic('back')}</button></div><h1>Artículos</h1><div class="pill r"><button data-act="go" data-v="rules" aria-label="Reglas">Reglas</button></div></div>${body}`;
 }
 let drillTimer = 0;
 function drillPick(a) {
@@ -1456,6 +1461,80 @@ function drillPick(a) {
   }
   render();
   if (ok) { clearTimeout(drillTimer); drillTimer = setTimeout(() => { if (S.screen === 'drill' && S.drill.choice) { drillNext(); render(); } }, 900); }
+}
+
+/* =====================================================================
+   11b. ARTICLE RULES (der / die / das hints)
+   ===================================================================== */
+// Groups of words whose article follows their meaning. exact: match the whole word only.
+const ART_GROUPS = [
+  { a: 'der', why: 'los meses son der', exact: true, w: 'januar februar märz april mai juni juli august september oktober november dezember jänner' },
+  { a: 'der', why: 'los días de la semana son der', exact: true, w: 'montag dienstag mittwoch donnerstag freitag samstag sonnabend sonntag' },
+  { a: 'der', why: 'las estaciones del año son der', exact: true, w: 'frühling sommer herbst winter' },
+  { a: 'der', why: 'los puntos cardinales son der', exact: true, w: 'norden süden osten westen nordosten nordwesten südosten südwesten' },
+  { a: 'der', why: 'el clima y los fenómenos del tiempo son der', w: 'regen schnee wind sturm nebel hagel blitz donner frost föhn orkan taifun tornado monsun nieselregen schauer niederschlag' },
+  { a: 'der', why: 'las bebidas alcohólicas son der', w: 'wein rotwein weißwein sekt schnaps whisky wodka rum gin cognac likör champagner glühwein bier' },
+  { a: 'der', why: 'los trenes son der', exact: true, w: 'zug ice ic intercity regionalexpress regionalzug güterzug nachtzug schnellzug' },
+  { a: 'der', why: 'las personas masculinas son der', exact: true, w: 'mann vater sohn bruder onkel opa großvater neffe cousin herr junge könig prinz bräutigam ehemann schwiegervater enkel' },
+  { a: 'die', why: 'las personas femeninas son die', exact: true, w: 'frau mutter tochter schwester tante oma großmutter nichte cousine dame königin prinzessin braut ehefrau schwiegermutter enkelin' },
+  { a: 'die', why: 'las flores son die', w: 'rose tulpe lilie nelke orchidee sonnenblume hyazinthe narzisse dahlie' },
+  { a: 'die', why: 'los números son die', exact: true, w: 'null eins zwei drei vier fünf sechs sieben acht neun zehn elf zwölf hundert tausend' },
+  { a: 'die', why: 'los aviones son die', exact: true, w: 'boeing concorde' },
+  { a: 'das', why: 'los colores son das', exact: true, w: 'rot blau grün gelb schwarz weiß grau braun orange lila rosa violett' },
+  { a: 'das', why: 'los metales y elementos químicos son das', exact: true, w: 'gold silber eisen kupfer blei zinn zink aluminium uran platin wolfram nickel' }
+].map(g => Object.assign(g, { set: new Set(g.w.split(' ')) }));
+// Endings, longest first. strong: true = almost always; false = only "suele".
+const ART_ENDINGS = [
+  ['ismus', 'der', true], ['schaft', 'die', true], ['heit', 'die', true], ['keit', 'die', true], ['ung', 'die', true],
+  ['ling', 'der', true], ['chen', 'das', true], ['lein', 'das', true], ['ment', 'das', true], ['tum', 'das', false],
+  ['tion', 'die', true], ['sion', 'die', true], ['ion', 'die', true], ['tät', 'die', true], ['age', 'die', true], ['ade', 'die', true],
+  ['anz', 'die', true], ['enz', 'die', true], ['ik', 'die', true], ['ur', 'die', true], ['ei', 'die', true], ['ie', 'die', true],
+  ['ist', 'der', true], ['nis', 'das', false], ['um', 'das', false], ['or', 'der', true],
+  ['in', 'die', false], ['e', 'die', false], ['t', 'die', false], ['er', 'der', false], ['o', 'das', false]
+];
+const ART_ENDING_NOTE = { in: ' (mujeres y profesiones: die Ärztin)', er: ' (personas y aparatos: der Lehrer, der Drucker)', t: ' (sobre todo -ft, -cht, -st: die Fahrt, die Nacht)', nis: '', o: ' (das Radio, das Kino, das Auto)' };
+function articleRule(n) {
+  const a = n.article; if (!ART.includes(a)) return null;
+  const w = String(n.de || '').trim().split(/[\s(]/)[0], lw = w.toLowerCase();
+  if (lw.length < 2) return null;
+  // 1. meaning groups (months, trains, alcohol…)
+  for (const g of ART_GROUPS) {
+    const hit = g.set.has(lw) || (!g.exact && [...g.set].some(x => x.length >= 5 && lw.endsWith(x)));
+    if (hit) return g.a === a ? { a, ok: true, txt: `${a}: ${g.why}` } : { a, ok: false, txt: `Excepción: ${g.why.replace(/ son (der|die|das)$/, ' suelen ser $1')}, pero ${w} es ${a}` };
+  }
+  // 2. compound word: the last word decides (Hauptbahnhof → der Bahnhof)
+  let best = null;
+  DB.notes.forEach(o => {
+    if (!ART.includes(o.article) || o === n) return;
+    const ow = String(o.de || '').trim().split(/[\s(]/)[0], low = ow.toLowerCase();
+    if (low.length >= 4 && lw.length - low.length >= 3 && lw.endsWith(low) && (!best || low.length > best.w.length)) best = { a: o.article, w: ow };
+  });
+  if (best && best.a === a) return { a, ok: true, txt: `${a}: palabra compuesta, manda la última parte (${a} ${best.w})` };
+  // 3. endings
+  if (/^ge/.test(lw) && lw.length > 4 && a === 'das' && !/(ung|heit|keit|schaft|ion)$/.test(lw)) return { a, ok: true, txt: 'das: muchas palabras con Ge- son das (das Gemüse, das Geräusch)' };
+  if (a === 'das' && lw.endsWith('en') && !lw.endsWith('chen') && lw.length > 4) return { a, ok: true, txt: 'das: si viene de un verbo (essen → das Essen), es das' };
+  for (const [end, ea, strong] of ART_ENDINGS) {
+    if (!lw.endsWith(end) || lw.length <= end.length + 1) continue;
+    const note = ART_ENDING_NOTE[end] || '';
+    if (ea === a) return { a, ok: true, txt: `${a}: las palabras en -${end} ${strong ? 'son' : 'suelen ser'} ${a}${note}` };
+    if (end === 'chen') return null; // der Kuchen, der Knochen: not diminutives
+    if (strong || end === 'e') return { a, ok: false, txt: `Ojo: -${end} ${strong ? 'casi siempre es' : 'suele ser'} ${ea}, pero ${w} es ${a}${end === 'e' && a === 'der' ? ' (muchos hombres y animales en -e son der: der Junge, der Löwe)' : ''}` };
+    return null;
+  }
+  return null;
+}
+function ruleHtml(n) {
+  const r = articleRule(n); if (!r) return '';
+  return `<button class="rule ${r.ok ? '' : 'exc'}" data-act="go" data-v="rules"><span class="rd ${r.a}"></span>${esc(r.txt)}</button>`;
+}
+function viewRules() {
+  const tbl = (title, a, rows) => `<div class="grp"><h3><span class="${a}">${a}</span> · ${title}</h3>${rows.map(r => `<div class="row rr"><span class="grow"><b>${r[0]}</b></span><span class="val">${r[1]}</span></div>`).join('')}</div>`;
+  return `<div class="bar"><div class="pill l"><button data-act="go" data-v="${S.rfrom || 'settings'}" aria-label="Volver">${ic('back')}</button></div><h1>Reglas der/die/das</h1><span></span></div>
+  <div class="scr"><div class="note" style="margin:8px 4px 4px">Son pistas, no leyes: casi todas tienen excepciones. En las palabras compuestas manda siempre la última parte: die Bahn + der Hof → der Bahnhof.</div>
+  ${tbl('masculino', 'der', [['Hombres y profesiones', 'Vater, Bäcker'], ['Estaciones, meses, días', 'Frühling, Juli, Montag'], ['Puntos cardinales', 'Norden, Osten'], ['Clima', 'Regen, Schnee, Wind'], ['Bebidas alcohólicas', 'Wein, Sekt (pero das Bier)'], ['Trenes y marcas de autos', 'Zug, ICE, BMW'], ['Sustantivos de verbos sin terminación', 'Gang, Fang, Sprung'], ['-er (personas, aparatos)', 'Lehrer, Drucker'], ['-ling', 'Schmetterling'], ['-or', 'Motor, Professor'], ['-ist', 'Journalist'], ['-ismus', 'Tourismus']])}
+  ${tbl('femenino', 'die', [['Mujeres', 'Mutter, Ärztin'], ['Flores', 'Rose, Tulpe'], ['Números', 'die Eins, die Zwei'], ['Aviones, motos, barcos', 'Boeing, Suzuki'], ['-e (muy frecuente, con excepciones)', 'Tasche, Lampe'], ['-t (sobre todo -ft, -cht)', 'Fahrt, Nacht'], ['-ung', 'Zeitung'], ['-heit / -keit', 'Freiheit, Möglichkeit'], ['-schaft', 'Freundschaft'], ['-ei', 'Bäckerei'], ['-ie', 'Biologie'], ['-in (mujeres)', 'Lehrerin'], ['-ion', 'Diskussion'], ['-tät', 'Qualität'], ['-ik', 'Musik'], ['-ur', 'Kultur'], ['-age / -ade', 'Garage, Schokolade'], ['-anz / -enz', 'Toleranz, Tendenz']])}
+  ${tbl('neutro', 'das', [['Verbos como sustantivo', 'das Essen, das Schreiben'], ['Adjetivos como sustantivo', 'das Gute, das Neue'], ['Colores', 'das Rot, das Blau'], ['Metales y elementos', 'Gold, Eisen'], ['-chen / -lein (diminutivos)', 'Mädchen, Fräulein'], ['-um', 'Zentrum, Museum'], ['-nis (casi siempre)', 'Ergebnis, Zeugnis'], ['-tum', 'Wachstum (pero der Irrtum)'], ['-ment', 'Instrument'], ['-o', 'Radio, Kino, Auto'], ['Ge- (grupos, cosas de verbos)', 'Gemüse, Geräusch']])}
+  <div style="height:30px"></div></div>`;
 }
 
 /* =====================================================================
@@ -1652,7 +1731,7 @@ function viewSettings() {
       <label class="chk" style="margin-top:14px"><input type="checkbox" ${S_.autoSpeak ? 'checked' : ''} data-ch="set" data-k="autoSpeak"> Leer en voz alta al mostrar respuesta</label>
       <button class="btn sec" data-act="speak-text" data-t="Die Nachhaltigkeit spielt eine große Rolle.">${ic('speaker', 20)} Probar</button></div></div>
     <div class="grp"><h3>Copia de seguridad</h3><div style="padding:4px 14px 14px"><label class="fl">Recordarme hacer una copia</label><select data-ch="set" data-k="backupEvery">${[[3, 'Cada 3 días'], [7, 'Cada semana'], [14, 'Cada 2 semanas'], [30, 'Cada mes'], [0, 'Nunca']].map(o => `<option value="${o[0]}" ${(S_.backupEvery === undefined ? 7 : +S_.backupEvery) === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></div></div>
-    <div class="grp"><h3>Práctica de artículos</h3><div style="padding:12px 16px"><label class="chk"><input type="checkbox" ${S_.drillAffects ? 'checked' : ''} data-ch="set" data-k="drillAffects"> El ejercicio der/die/das afecta al calendario</label></div></div>
+    <div class="grp"><h3>Práctica de artículos</h3>${rowBtn('go', 'select', 'Reglas der/die/das', 'data-v="rules"', 'cómo adivinar el artículo')}<div style="padding:12px 16px"><label class="chk"><input type="checkbox" ${S_.drillAffects ? 'checked' : ''} data-ch="set" data-k="drillAffects"> El ejercicio der/die/das afecta al calendario</label></div></div>
     <div class="note" style="text-align:center;padding:8px 16px 24px">Versión ${APP_VERSION}</div></div>`;
 }
 
@@ -1796,7 +1875,7 @@ function pasteSave() {
    ===================================================================== */
 const A = {
   'sheet-close': () => closeSheet(),
-  go: el => { if (el.dataset.v === 'settings') S.sfrom = S.screen; go(el.dataset.v); },
+  go: el => { if (el.dataset.v === 'settings') S.sfrom = S.screen; if (el.dataset.v === 'rules' && S.screen !== 'rules') S.rfrom = S.screen; go(el.dataset.v); },
   study: el => { closeSheet(); startStudy(el.dataset.id); },
   toggle: el => { const id = el.dataset.id, i = DB.collapsed.indexOf(id); if (i < 0) DB.collapsed.push(id); else DB.collapsed.splice(i, 1); save(); render(); },
   deckmenu: el => deckMenu(el.dataset.id),

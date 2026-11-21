@@ -1,7 +1,7 @@
 // Offline cache for Vokabeln. Bump CACHE (and APP_VERSION in index.html) when a cached file changes.
 // The page is loaded network-first, so a new version shows up on the next open;
 // the cache is only the fallback when the phone is offline.
-const CACHE = 'vokabeln-v10';
+const CACHE = 'vokabeln-v11';
 const ASSETS = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
