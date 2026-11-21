@@ -538,21 +538,27 @@ function importText(text, deck) {
   let rows = parseDelim(text, sep);
   if (sep === ',') rows = rows.map(r => (ART.includes((r[0] || '').trim().split(/\s+/)[0].toLowerCase()) && /^\s*[¨"=\-–]/.test(r[1] || '')) ? [r[0] + ', ' + r[1]].concat(r.slice(2)) : r);
   if (rows.length && /^(word|palabra|wort|de|deutsch)$/i.test((rows[0][0] || '').trim())) rows.shift();
-  const keys = new Set(DB.notes.map(noteKey)); let added = 0, dup = 0, skip = 0; const t0 = Date.now();
+  const keys = new Set(DB.notes.map(noteKey)); let added = 0, dup = 0, skip = 0, moved = 0; const t0 = Date.now();
   rows.forEach(r => {
     // Columns: word, es, example, register, tags, [en], [deck path]
     const w = parseWord(r[0] || ''), es = stripHtml(r[1]), en = stripHtml(r[5]);
     if (!w.de || !(es || en)) { skip++; return; }
     const k = (w.article + '|' + w.de).toLowerCase();
-    if (keys.has(k)) { dup++; return; }
-    keys.add(k);
     const tags = stripHtml(r[4]).split(/[\s,;]+/).filter(Boolean);
     const d = stripHtml(r[6]).trim() || deck;
+    if (keys.has(k)) {
+      // Re-import of the same file: move a still-unstudied note to the deck the file names.
+      const ex = stripHtml(r[6]).trim() && tags.length && DB.notes.find(n => noteKey(n) === k);
+      if (ex && ex.deck !== d && tags.every(t => ex.tags.includes(t)) && DB.cards.every(c => c.nid !== ex.id || c.reps === 0)) { ensureDeck(d); ex.deck = d; moved++; }
+      else dup++;
+      return;
+    }
+    keys.add(k);
     addNote({ article: w.article, de: w.de, plural: w.plural, es, en, example: stripHtml(r[2]), register: normRegister(r[3]), tags }, d, t0 + added);
     added++;
   });
   save();
-  return { added, dup, skip };
+  return { added, dup, skip, moved };
 }
 function exportTxt() {
   return DB.notes.map(n => [artWord(n) + (n.plural ? ' (pl. ' + n.plural + ')' : ''), n.es || n.en, n.example, n.register, n.tags.join(' ')].map(x => String(x || '').replace(/[\t\r\n]+/g, ' ')).join('\t')).join('\n');
@@ -1395,7 +1401,7 @@ function importMenu() {
     <label class="btn sec" style="cursor:pointer">${ic('export', 20)} Elegir archivo<input type="file" accept=".txt,.csv,.tsv,text/plain,text/csv" data-ch="importfile" style="display:none"></label>
     <div class="note">Columnas: palabra;significado;ejemplo;registro;etiquetas. Separador tabulador, punto y coma o coma. Las líneas con # se omiten y las repetidas (mismo artículo y palabra) también.</div>`, true);
 }
-function reportImport(r) { closeSheet(); render(); toast(`Importadas ${r.added} · repetidas ${r.dup} · omitidas ${r.skip}`); }
+function reportImport(r) { closeSheet(); render(); toast(`Importadas ${r.added}${r.moved ? " · movidas " + r.moved : ""} · repetidas ${r.dup} · omitidas ${r.skip}`); }
 function resetProgress() {
   if (!confirm('¿Reiniciar el progreso de todas las tarjetas? Se conservan las palabras.')) return;
   DB.cards.forEach(c => Object.assign(c, { state: 'new', step: 0, ivl: 0, ease: 2.5, reps: 0, lapses: 0, due: 0, dueDay: 0, buryDay: -1, suspended: false, last: 0 }));
